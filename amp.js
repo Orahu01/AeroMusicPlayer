@@ -49,6 +49,7 @@ const S = {
   eq:{ bgm:EQ_DEFAULT(), sfx:EQ_DEFAULT() },
   limiter:true, wake:true, confirmExit:true, autoAdv:true, autoMix:false,
   cols:5, padCount:20, deckCount:2,
+  webVol:1, webOpen:false, webHistory:[],
 };
 
 /* ---------------------------------------------------------
@@ -728,6 +729,242 @@ function stopCue() {
 }
 
 /* ---------------------------------------------------------
+   WEB プレイヤー（YouTube・配信リンク）
+   各サービスの公式埋め込みプレイヤーをそのまま載せる方式。
+   音声は 3 バスを通らず Windows の既定出力デバイスへ出る
+   （Voicemeeter 利用時は既定を VoiceMeeter Input にすると BGM と同じ卓に乗る）。
+   YouTube / YT Music はフル再生＋操作可。Spotify / Apple Music は公式
+   ウィジェット（環境によりプレビューのみ）。Amazon Music はブラウザで開くだけ。
+   --------------------------------------------------------- */
+const WEB = { kind:null, player:null, ready:false, loop:false, fadeTok:0, rampT:null, pendingHist:null };
+
+function parseMediaLink(raw) {
+  let u; try { u = new URL(raw.trim()); } catch { return null; }
+  const h = u.hostname.replace(/^(www|m)\./, '');
+  if (h === 'youtu.be') {
+    const id = u.pathname.slice(1).split('/')[0];
+    return id ? { type:'youtube', id, list:u.searchParams.get('list') || '' } : null;
+  }
+  if (h === 'youtube.com' || h === 'music.youtube.com' || h === 'youtube-nocookie.com') {
+    const list = u.searchParams.get('list') || '';
+    let id = u.searchParams.get('v') || '';
+    const m = u.pathname.match(/^\/(?:shorts|live|embed)\/([\w-]+)/);
+    if (!id && m) id = m[1];
+    return (id || list) ? { type:'youtube', id, list } : null;
+  }
+  if (h === 'open.spotify.com') {
+    const m = u.pathname.match(/^\/(?:intl-[a-z]{2}(?:-[A-Za-z]{2})?\/)?(track|album|playlist|artist|episode|show)\/([A-Za-z0-9]+)/);
+    return m ? { type:'spotify', embed:'https://open.spotify.com/embed/' + m[1] + '/' + m[2], label:m[1] + '/' + m[2] } : null;
+  }
+  if (h === 'music.apple.com') {
+    const label = decodeURIComponent(u.pathname.split('/').filter(Boolean).slice(-2).join('/'));
+    return { type:'apple', embed:'https://embed.music.apple.com' + u.pathname + u.search, label };
+  }
+  if (/(^|\.)music\.amazon\./.test(u.hostname)) return { type:'amazon', url:raw.trim() };
+  return null;
+}
+
+let ytApiP = null;
+function loadYtApi() {
+  if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+  if (ytApiP) return ytApiP;
+  ytApiP = new Promise((res, rej) => {
+    const fail = msg => { ytApiP = null; rej(new Error(msg)); };
+    const to = setTimeout(() => fail('YouTube を読み込めません（インターネット接続を確認してください）'), 12000);
+    window.onYouTubeIframeAPIReady = () => { clearTimeout(to); res(window.YT); };
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    s.onerror = () => { clearTimeout(to); fail('YouTube を読み込めません（インターネット接続を確認してください）'); };
+    document.head.appendChild(s);
+  });
+  return ytApiP;
+}
+
+/* BGMフェーダー・ミュート・DUCK を反映した実効音量 (0-100) */
+function webEffVol() {
+  const duckF = (S.duck.on && voiceCount() > 0) ? Math.pow(10, -S.duck.amount / 20) : 1;
+  const master = S.mute.bgm ? 0 : Math.min(S.vol.bgm, 1);
+  return clamp(Math.round(S.webVol * 100 * master * duckF), 0, 100);
+}
+function applyWebVol(ms = 100) {
+  if (WEB.kind !== 'yt' || !WEB.ready || !WEB.player) return;
+  const target = webEffVol();
+  clearInterval(WEB.rampT); WEB.rampT = null;
+  let from; try { from = WEB.player.getVolume(); } catch { return; }
+  if (ms <= 0 || Math.abs(from - target) < 2) { try { WEB.player.setVolume(target); } catch {} return; }
+  const t0 = performance.now();
+  WEB.rampT = setInterval(() => {
+    const p = Math.min(1, (performance.now() - t0) / ms);
+    try { WEB.player.setVolume(Math.round(from + (target - from) * p)); } catch {}
+    if (p >= 1) { clearInterval(WEB.rampT); WEB.rampT = null; }
+  }, 30);
+}
+const webPlaying = () =>
+  WEB.kind === 'yt' && WEB.ready && WEB.player && WEB.player.getPlayerState && WEB.player.getPlayerState() === 1;
+
+function webFade(dirIn) {
+  if (WEB.kind !== 'yt' || !WEB.ready) return;
+  const tok = ++WEB.fadeTok;
+  clearInterval(WEB.rampT); WEB.rampT = null;
+  const target = dirIn ? webEffVol() : 0;
+  let from;
+  if (dirIn) { try { WEB.player.setVolume(0); WEB.player.playVideo(); } catch {} from = 0; }
+  else { try { from = WEB.player.getVolume(); } catch { return; } }
+  const t0 = performance.now(), dur = Math.max(dirIn ? S.fade.in : S.fade.out, 0.05) * 1000;
+  WEB.rampT = setInterval(() => {
+    if (tok !== WEB.fadeTok) { clearInterval(WEB.rampT); WEB.rampT = null; return; }
+    const p = Math.min(1, (performance.now() - t0) / dur);
+    try { WEB.player.setVolume(Math.round(from + (target - from) * p)); } catch {}
+    if (p >= 1) {
+      clearInterval(WEB.rampT); WEB.rampT = null;
+      if (!dirIn) {
+        try { WEB.player.pauseVideo(); } catch {}
+        setTimeout(() => { if (tok === WEB.fadeTok) applyWebVol(0); }, 150);   // 次回再生に備え音量を戻す
+      }
+    }
+  }, 40);
+}
+
+function onYtState(e) {
+  $('#webPlay').textContent = e.data === 1 ? '❚❚' : '▶';
+  if (e.data === 1 && WEB.pendingHist) {
+    let label = '';
+    try { label = (WEB.player.getVideoData() || {}).title || ''; } catch {}
+    pushWebHistory(WEB.pendingHist, label || 'YouTube', 'YouTube');
+    WEB.pendingHist = null;
+  }
+  if (e.data === 0 && WEB.loop) { try { WEB.player.seekTo(0, true); WEB.player.playVideo(); } catch {} }
+}
+
+async function loadWebLink(raw) {
+  const info = parseMediaLink(raw);
+  if (!info) { toast('対応していないリンクです（YouTube / Spotify / Apple Music / Amazon Music）', true); return; }
+  if (info.type === 'amazon') {
+    window.open(info.url);
+    toast('Amazon Music は埋め込み再生に対応していないため、ブラウザで開きました');
+    pushWebHistory(raw, 'Amazon Music のリンク', 'Amazon');
+    return;
+  }
+  setWebOpen(true);
+  const ytWrap = $('#ytWrap'), frame = $('#webFrame'), empty = $('#webEmpty'), ctrl = $('#webCtrl');
+  if (info.type === 'youtube') {
+    frame.style.display = 'none'; frame.src = 'about:blank';
+    empty.style.display = 'none'; ytWrap.style.display = '';
+    ctrl.classList.remove('noctl');
+    WEB.kind = 'yt'; WEB.pendingHist = raw;
+    try {
+      const api = await loadYtApi();
+      if (!WEB.player) {
+        WEB.ready = false;
+        WEB.player = new api.Player('ytHost', {
+          width:'100%', height:'100%',
+          videoId: info.id || undefined,
+          playerVars: { controls:1, rel:0, playsinline:1, origin:location.origin,
+                        ...(info.list ? { listType:'playlist', list:info.list } : {}) },
+          events: {
+            onReady: () => { WEB.ready = true; applyWebVol(0); try { WEB.player.playVideo(); } catch {} },
+            onStateChange: onYtState,
+            onError: ev => {
+              const msg = { 2:'リンクが正しくありません', 5:'再生できません', 100:'動画が見つかりません',
+                            101:'この動画は埋め込み再生が許可されていません',
+                            150:'この動画は埋め込み再生が許可されていません' }[ev.data] || '再生できません';
+              toast('YouTube: ' + msg, true);
+            },
+          },
+        });
+      } else {
+        WEB.fadeTok++;
+        if (info.list) WEB.player.loadPlaylist({ listType:'playlist', list:info.list });
+        else WEB.player.loadVideoById(info.id);
+        applyWebVol(0);
+      }
+    } catch (e) {
+      toast(e.message, true);
+      WEB.kind = null; ytWrap.style.display = 'none'; empty.style.display = '';
+    }
+    return;
+  }
+  /* Spotify / Apple Music: 公式ウィジェット（操作はウィジェット内のボタンで） */
+  if (webPlaying()) { WEB.fadeTok++; try { WEB.player.pauseVideo(); } catch {} }
+  WEB.kind = 'iframe';
+  ytWrap.style.display = 'none'; empty.style.display = 'none';
+  frame.style.display = ''; frame.src = info.embed;
+  ctrl.classList.add('noctl');
+  pushWebHistory(raw, (info.type === 'spotify' ? 'Spotify ' : 'Apple Music ') + (info.label || ''),
+                 info.type === 'spotify' ? 'Spotify' : 'Apple');
+  toast(info.type === 'spotify'
+    ? 'Spotify ウィジェットを読み込みました（再生はウィジェット内のボタンで）'
+    : 'Apple Music ウィジェットを読み込みました（プレビュー再生）');
+}
+
+function pushWebHistory(url, label, badge) {
+  S.webHistory = (S.webHistory || []).filter(x => x.url !== url);
+  S.webHistory.unshift({ url, label:(label || url).slice(0, 80), badge });
+  S.webHistory = S.webHistory.slice(0, 12);
+  renderWebHistory(); saveState();
+}
+function renderWebHistory() {
+  const box = $('#webHist'); if (!box) return;
+  box.replaceChildren();
+  for (const it of S.webHistory || []) {
+    const d = document.createElement('div');
+    d.className = 'wh'; d.title = it.url;
+    d.innerHTML = '<span class="b"></span><span class="t"></span><button class="x">✕</button>';
+    $('.b', d).textContent = it.badge || 'link';
+    $('.t', d).textContent = it.label;
+    d.onclick = e => {
+      if (e.target.closest('.x')) {
+        S.webHistory = S.webHistory.filter(x => x !== it);
+        renderWebHistory(); saveState(); return;
+      }
+      $('#webUrl').value = it.url; loadWebLink(it.url);
+    };
+    box.appendChild(d);
+  }
+}
+
+function setWebOpen(open) {
+  S.webOpen = !!open;
+  $('#webPanel').style.display = S.webOpen ? '' : 'none';
+  $('#webToggle').classList.toggle('on', S.webOpen);
+  $('#webToggle').textContent = S.webOpen ? '閉じる' : '表示';
+  saveState();
+}
+function updateWebTime() {
+  if (WEB.kind !== 'yt' || !WEB.ready) return;
+  let c = 0, d = 0;
+  try { c = WEB.player.getCurrentTime() || 0; d = WEB.player.getDuration() || 0; } catch {}
+  $('#webTime').textContent = fmt(c) + ' / ' + fmt(d);
+}
+function bindWebUI() {
+  $('#webToggle').onclick = () => setWebOpen(!S.webOpen);
+  $('#webLoad').onclick = () => { const v = $('#webUrl').value.trim(); if (v) loadWebLink(v); };
+  $('#webUrl').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#webLoad').click(); } });
+  $('#webExt').onclick = () => { const v = $('#webUrl').value.trim(); if (v) window.open(v); };
+  $('#webPlay').onclick = () => {
+    if (WEB.kind !== 'yt' || !WEB.ready) return;
+    WEB.fadeTok++;
+    try { webPlaying() ? WEB.player.pauseVideo() : (applyWebVol(0), WEB.player.playVideo()); } catch {}
+  };
+  $('#webStop').onclick = () => {
+    if (WEB.kind !== 'yt' || !WEB.ready) return;
+    WEB.fadeTok++;
+    try { WEB.player.stopVideo(); } catch {}
+    $('#webPlay').textContent = '▶';
+  };
+  $('#webLoop').onclick = e => { WEB.loop = !WEB.loop; e.target.classList.toggle('on', WEB.loop); };
+  $('#webFin').onclick = () => webFade(true);
+  $('#webFout').onclick = () => webFade(false);
+  const wv = $('#webVol'), wvv = $('#webVolV');
+  wv.value = S.webVol; wvv.textContent = Math.round(S.webVol * 100) + '%';
+  wv.oninput = () => { S.webVol = +wv.value; wvv.textContent = Math.round(S.webVol * 100) + '%'; applyWebVol(0); saveState(); };
+  renderWebHistory();
+  $('#webPanel').style.display = S.webOpen ? '' : 'none';
+  $('#webToggle').classList.toggle('on', S.webOpen);
+  $('#webToggle').textContent = S.webOpen ? '閉じる' : '表示';
+}
+
+/* ---------------------------------------------------------
    ダッキング
    --------------------------------------------------------- */
 let duckState = false;
@@ -737,9 +974,10 @@ function updateDuck() {
   duckState = active;
   const g = BUS.bgm.duck.gain, t = BUS.bgm.ctx.currentTime;
   g.cancelScheduledValues(t);
-  if (!S.duck.on) { g.setTargetAtTime(1, t, .01); return; }
+  if (!S.duck.on) { g.setTargetAtTime(1, t, .01); applyWebVol(60); return; }
   g.setTargetAtTime(active ? Math.pow(10, -S.duck.amount / 20) : 1,
                     t, active ? .02 : S.duck.release / 3000);
+  applyWebVol(active ? 80 : Math.min(S.duck.release, 600));   // WEB プレイヤーにも DUCK を反映
 }
 
 /* ---------------------------------------------------------
@@ -932,6 +1170,7 @@ function loop() {
       d.$rem.classList.toggle('hot', d.playing && dur > 0 && rem <= 15);
     }
   }
+  if (frame % 30 === 0) updateWebTime();
   if (frame % 6 === 0) {
     for (const p of PADS) p.tick();
     $('#sfxVoices').textContent = voiceCount() + ' 音';
@@ -954,8 +1193,12 @@ function meter(bar, pk, bus) {
   el.classList.toggle('clip', v >= .995);
   if (pk) $(pk).style.left = clamp((20 * Math.log10(Math.max(bus.hold, 1e-5)) + 54) / 57, 0, 1) * 100 + '%';
 }
-/* 最小化中は requestAnimationFrame が止まるため、曲つなぎだけはタイマーでも監視する */
-setInterval(() => { checkAutoMix(); if (CH && popAlive && Date.now() - popAlive > 4000) popAlive = 0; }, 250);
+/* 最小化中は requestAnimationFrame が止まるため、曲つなぎ・WEB時間表示はタイマーでも更新する */
+setInterval(() => {
+  checkAutoMix();
+  updateWebTime();
+  if (CH && popAlive && Date.now() - popAlive > 4000) popAlive = 0;
+}, 250);
 
 /* ---------------------------------------------------------
    キーボード
@@ -987,6 +1230,8 @@ function panic() {
   PADS.forEach(p => p.stopAll(60));
   DECKS.forEach(d => d.stop());
   stopCue();
+  WEB.fadeTok++;
+  if (WEB.kind === 'yt' && WEB.ready) { try { WEB.player.pauseVideo(); } catch {} }
   toast('全停止しました');
 }
 
@@ -1033,6 +1278,7 @@ function saveState() {
       theme:S.theme, sinks:S.sinks, duck:S.duck, fade:S.fade, vol:S.vol, mute:S.mute, eq:S.eq,
       limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
       cols:S.cols, padCount:PADS.length, deckCount:DECKS.length,
+      webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
       pads:PADS.map(p => p.conf()),
       playlist:PL.map(it => ({ name:it.name, path:it.path })),
     }).catch(() => {});
@@ -1051,6 +1297,9 @@ async function restoreState() {
   S.autoMix = !!d.autoMix; S.cols = d.cols || 5;
   S.deckCount = clamp(d.deckCount || 2, 1, MAX_DECKS);
   S.padCount = clamp(d.padCount || 20, 1, MAX_PADS);
+  S.webVol = clamp(d.webVol != null ? +d.webVol : 1, 0, 1);
+  S.webOpen = !!d.webOpen;
+  S.webHistory = Array.isArray(d.webHistory) ? d.webHistory.slice(0, 12) : [];
   return d;
 }
 async function reconnectLibrary(interactive) {
@@ -1100,10 +1349,10 @@ function bindUI() {
     BUS.cue.setVolume(S.vol.cue);
   };
   const vb = $('#volBgm'), vs = $('#volSfx'), vc = $('#volCue');
-  vb.oninput = () => { S.vol.bgm = +vb.value; applyVol(); saveState(); };
+  vb.oninput = () => { S.vol.bgm = +vb.value; applyVol(); applyWebVol(60); saveState(); };
   vs.oninput = () => { S.vol.sfx = +vs.value; applyVol(); saveState(); };
   vc.oninput = () => { S.vol.cue = +vc.value; applyVol(); saveState(); };
-  $('#muteBgm').onclick = e => { S.mute.bgm = !S.mute.bgm; e.target.classList.toggle('muted', S.mute.bgm); applyVol(); saveState(); };
+  $('#muteBgm').onclick = e => { S.mute.bgm = !S.mute.bgm; e.target.classList.toggle('muted', S.mute.bgm); applyVol(); applyWebVol(60); saveState(); };
   $('#muteSfx').onclick = e => { S.mute.sfx = !S.mute.sfx; e.target.classList.toggle('muted', S.mute.sfx); applyVol(); saveState(); };
   $('#cueStop').onclick = stopCue;
 
@@ -1226,7 +1475,7 @@ function bindUI() {
 
   addEventListener('beforeunload', e => {
     if (CH) CH.postMessage({ t:'close' });
-    if (S.confirmExit && (DECKS.some(d => d.playing) || voiceCount() > 0)) { e.preventDefault(); e.returnValue = ''; }
+    if (S.confirmExit && (DECKS.some(d => d.playing) || voiceCount() > 0 || webPlaying())) { e.preventDefault(); e.returnValue = ''; }
   });
   addEventListener('resize', () => DECKS.forEach(d => d.drawWave()));
 }
@@ -1306,6 +1555,7 @@ function bindUpdater() {
   bindUI();
   buildMixer();
   bindUpdater();
+  bindWebUI();
 
   $('#volBgm').value = S.vol.bgm; $('#volSfx').value = S.vol.sfx; $('#volCue').value = S.vol.cue;
   $('#muteBgm').classList.toggle('muted', S.mute.bgm);

@@ -11,7 +11,7 @@
    ユーザーが「再起動して適用」を押した時だけ入れ替える（本番中に勝手に落ちない）。
    ========================================================= */
 'use strict';
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, session, shell } = require('electron');
 const { ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
@@ -65,9 +65,11 @@ function createWindow(urlPath, opts = {}) {
   win.on('closed', () => { windows.delete(win); if (win === mainWin) mainWin = null; });
 
   // 本体からの window.open('pads.html', …) を独立ウィンドウとして開く
-  // （SuperDisplay 等でタブレット側の画面へドラッグできるように）
+  // （SuperDisplay 等でタブレット側の画面へドラッグできるように）。
+  // それ以外の外部リンク（GitHub・Amazon Music 等）は既定のブラウザへ。
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.endsWith('pads.html')) createWindow('pads.html', { width: 900, height: 650 });
+    if (url.endsWith('pads.html')) { createWindow('pads.html', { width: 900, height: 650 }); return { action: 'deny' }; }
+    if (/^https?:\/\//i.test(url) && !url.startsWith('http://127.0.0.1')) shell.openExternal(url);
     return { action: 'deny' };
   });
 

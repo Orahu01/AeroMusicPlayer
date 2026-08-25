@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>AMP — SEパッド</title>
+<style>
+:root{
+  --bg:#efeeec; --surface:#ffffff; --surface2:#f7f6f4; --surface3:#eceae7;
+  --fg:#141414; --fg2:#5f5f5c; --fg3:#94938f;
+  --line:#141414; --line2:#d8d6d2;
+  --inv-bg:#141414; --inv-fg:#ffffff; --hot:#b4291f; --r:3px;
+}
+html[data-theme="dark"]{
+  --bg:#141414; --surface:#1e1e1e; --surface2:#262626; --surface3:#2e2e2e;
+  --fg:#f2f1ee; --fg2:#a8a6a1; --fg3:#6f6d69;
+  --line:#f2f1ee; --line2:#3a3a38;
+  --inv-bg:#f2f1ee; --inv-fg:#141414; --hot:#e5645a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:"Segoe UI","Yu Gothic UI",Meiryo,system-ui,sans-serif;
+  font-size:13px;overflow:hidden;user-select:none;-webkit-tap-highlight-color:transparent;
+  display:flex;flex-direction:column;height:100vh;
+}
+button{font:inherit;color:inherit;background:none;border:none}
+header{
+  display:flex;align-items:center;gap:8px;padding:0 12px;height:44px;flex-shrink:0;
+  background:var(--surface);border-bottom:1px solid var(--line);
+}
+header .n{font-size:14px;font-weight:700}
+header .st{font-size:10px;color:var(--fg3);border:1px solid var(--line2);border-radius:var(--r);padding:1px 6px}
+header .st.live{color:#2f7a3a}
+.spacer{flex:1}
+.btn{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);padding:6px 12px;font-size:12px}
+.btn:active{background:var(--inv-bg);color:var(--inv-fg)}
+.btn.hot{border-color:var(--hot);color:var(--hot)}
+.btn.hot:active{background:var(--hot);color:#fff}
+
+#grid{flex:1;display:grid;gap:8px;padding:10px;overflow-y:auto;align-content:start;
+  grid-template-columns:repeat(var(--cols,5),1fr)}
+.pad{
+  position:relative;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);
+  min-height:88px;padding:8px 10px 8px 13px;display:flex;flex-direction:column;
+  touch-action:none;overflow:hidden;
+}
+.pad::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--pc,transparent)}
+.pad.empty{border-style:dashed;border-color:var(--line2);color:var(--fg3);align-items:center;justify-content:center;text-align:center;font-size:11px}
+.pad.empty::before{display:none}
+.pad.playing{background:var(--inv-bg);color:var(--inv-fg);border-color:var(--inv-bg)}
+.p-key{position:absolute;top:5px;right:6px;font-size:11px;font-weight:700;border:1px solid var(--line2);
+  border-radius:2px;padding:0 5px;line-height:17px;color:var(--fg2)}
+.pad.playing .p-key{border-color:var(--inv-fg);color:var(--inv-fg)}
+.p-name{font-size:13px;font-weight:600;line-height:1.3;padding-right:24px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
+.p-mode{margin-top:auto;font-size:10px;color:var(--fg3)}
+.pad.playing .p-mode{color:var(--inv-fg);opacity:.8}
+
+footer{display:flex;align-items:center;gap:10px;padding:0 12px;height:22px;flex-shrink:0;
+  background:var(--surface3);border-top:1px solid var(--line);font-size:10px;color:var(--fg3)}
+</style>
+</head>
+<body>
+<header>
+  <span class="n">AMP パッド</span>
+  <span class="st" id="st">接続待ち…</span>
+  <div class="spacer"></div>
+  <button class="btn" id="theme">◐</button>
+  <button class="btn" id="stopSfx">SE停止</button>
+  <button class="btn hot" id="panic">■ 全停止</button>
+</header>
+<div id="grid"></div>
+<footer>本体（AeroMusicPlayer）を起動した状態でご利用ください。この窓を叩くだけで本体の音が鳴ります。</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const grid = $('#grid'), stEl = $('#st');
+const CH = new BroadcastChannel('amp-pads');
+let cols = 5, pads = [];
+
+function render() {
+  grid.style.setProperty('--cols', cols);
+  const need = pads.length;
+  while (grid.children.length < need) {
+    const d = document.createElement('div');
+    d.className = 'pad empty';
+    d.innerHTML = '<div class="p-key"></div><div class="p-name"></div><div class="p-mode"></div>';
+    grid.appendChild(d);
+  }
+  while (grid.children.length > need) grid.lastChild.remove();
+  pads.forEach((p, i) => {
+    const el = grid.children[i];
+    el.style.setProperty('--pc', p.color || 'transparent');
+    el.classList.toggle('empty', !p.loaded);
+    el.classList.toggle('playing', !!p.playing);
+    el.querySelector('.p-key').textContent = p.key || '';
+    el.querySelector('.p-name').textContent = p.loaded ? p.name : '（未設定）';
+    el.querySelector('.p-mode').textContent = p.loaded ? p.mode : '';
+    el.onpointerdown = e => {
+      if (!p.loaded) return;
+      e.preventDefault();
+      CH.postMessage({ t:'down', i });
+      const id = e.pointerId;
+      const up = ev => { if (ev.pointerId !== id) return; CH.postMessage({ t:'up', i }); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
+      addEventListener('pointerup', up); addEventListener('pointercancel', up);
+    };
+  });
+}
+
+CH.onmessage = ev => {
+  const m = ev.data; if (!m) return;
+  if (m.t === 'state') {
+    stEl.textContent = '本体に接続中'; stEl.classList.add('live');
+    cols = m.cols || 5; pads = m.pads || [];
+    document.documentElement.dataset.theme = m.theme || 'light';
+    render();
+  } else if (m.t === 'close') {
+    stEl.textContent = '本体が閉じられました'; stEl.classList.remove('live');
+  }
+};
+$('#panic').onclick = () => CH.postMessage({ t:'panic' });
+$('#stopSfx').onclick = () => CH.postMessage({ t:'stopSfx' });
+$('#theme').onclick = () => {
+  const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+};
+
+CH.postMessage({ t:'hello' });
+setInterval(() => CH.postMessage({ t:'ping' }), 1500);
+addEventListener('beforeunload', () => CH.postMessage({ t:'bye' }));
+
+// 誤操作防止：ピンチズーム・ダブルタップズーム・長押しメニューを無効化
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('contextmenu', e => e.preventDefault());
+</script>
+</body>
+</html>

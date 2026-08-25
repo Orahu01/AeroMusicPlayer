@@ -1,0 +1,23 @@
+# AMP 個人設定・音源（配布物には含めない）
+.amp-profile/
+
+# 開発ツール側のローカル設定（このリポジトリの成果物ではない）
+.claude/
+
+# テスト用に生成した一時音声
+_test/
+*.tmp.wav
+
+# Node / Electron
+node_modules/
+dist/
+out/
+release/
+build/
+*.log
+npm-debug.log*
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

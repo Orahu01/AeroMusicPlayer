@@ -1,0 +1,61 @@
+{
+  "name": "aeromusic-player",
+  "version": "1.0.0",
+  "description": "文化祭などでBGMと効果音を同時に多重再生するための音声プレイヤー",
+  "private": true,
+  "license": "MIT",
+  "author": "Orahu01",
+  "main": "electron/main.js",
+  "homepage": "https://github.com/Orahu01/AeroMusicPlayer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Orahu01/AeroMusicPlayer.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis portable",
+    "release": "electron-builder --win nsis portable --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "io.github.orahu01.aeromusicplayer",
+    "productName": "AeroMusic Player",
+    "files": [
+      "electron/**/*",
+      "AeroMusicPlayer.html",
+      "pads.html",
+      "amp.js",
+      "!**/.amp-profile/**"
+    ],
+    "directories": { "output": "dist" },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "AeroMusicPlayer-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "AeroMusicPlayer-${version}-portable.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Orahu01",
+      "repo": "AeroMusicPlayer"
+    }
+  }
+}

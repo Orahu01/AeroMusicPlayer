@@ -322,6 +322,64 @@ footer b{color:var(--fg)}
   background:var(--surface);border:2px dashed var(--line);font-size:17px;font-weight:700;pointer-events:none}
 #drop.show{display:grid}
 
+/* ---------- タブ / 検索 ---------- */
+.tab{font-size:11px;font-weight:700;letter-spacing:1.2px;padding:5px 11px;border:1px solid var(--line2);
+  border-radius:var(--r);background:transparent;color:var(--fg2)}
+.tab.on{background:var(--inv-bg);color:var(--inv-fg);border-color:var(--inv-bg)}
+.plsearch{width:130px;min-width:90px;background:var(--surface);border:1px solid var(--line2);
+  border-radius:var(--r);padding:4px 8px;color:var(--fg);outline:none}
+.plsearch:focus{border-color:var(--line)}
+.pl-mark{font-size:11px;color:var(--c-bgm);flex-shrink:0;letter-spacing:1px}
+.pl-item.dragging,.cue-item.dragging{opacity:.4}
+.pl-item.drop,.cue-item.drop{box-shadow:inset 0 2px 0 var(--c-bgm)}
+.pl-item.drop.drop-after,.cue-item.drop.drop-after{box-shadow:inset 0 -2px 0 var(--c-bgm)}
+
+/* ---------- 進行表 ---------- */
+#cuePanel{flex:1;display:flex;flex-direction:column;min-height:0}
+#cueList{flex:1;overflow-y:auto;min-height:0;background:var(--surface)}
+.cue-item{display:flex;align-items:center;gap:9px;padding:6px 10px;border-bottom:1px solid var(--line3);cursor:pointer}
+.cue-item:hover{background:var(--surface2)}
+.cue-item.done{opacity:.45}
+.cue-item.next{background:var(--c-bgm-wash);box-shadow:inset 3px 0 0 var(--c-bgm)}
+.cue-no{width:22px;font-size:10px;color:var(--fg3);text-align:right;flex-shrink:0}
+.cue-icon{width:16px;text-align:center;flex-shrink:0;color:var(--c-bgm);font-weight:700}
+.cue-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.cue-label{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cue-detail{font-size:10.5px;color:var(--fg3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cue-acts{display:none;gap:3px;flex-shrink:0}
+.cue-item:hover .cue-acts{display:flex}
+#cueBar{display:flex;align-items:center;gap:10px;padding:8px 10px;border-top:1px solid var(--line);background:var(--surface3)}
+#cueNext{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#cueGo{background:var(--c-bgm);color:#fff;border-color:var(--c-bgm);font-weight:700;min-width:92px;padding:9px 16px}
+#cueGo:hover:not(:disabled){filter:brightness(1.1)}
+#cueGo:disabled{background:var(--surface);color:var(--fg3);border-color:var(--line2)}
+
+/* ---------- 曲の調整（オートメーション） ---------- */
+.auto-row{display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid var(--line3)}
+.auto-row .t{width:66px;text-align:center;background:var(--surface);border:1px solid var(--line2);border-radius:var(--r);padding:5px 4px;color:var(--fg)}
+.auto-row .o{width:62px;background:var(--surface);border:1px solid var(--line2);border-radius:var(--r);padding:5px 4px;color:var(--fg)}
+.auto-row .v{flex:1;min-width:60px}
+.auto-row .val{width:44px}
+code{background:var(--surface3);border:1px solid var(--line2);border-radius:2px;padding:0 4px;font-size:11px}
+
+/* ---------- 起動時チェックの警告 ---------- */
+#checkBar{display:flex;align-items:center;gap:10px;padding:7px 12px;background:#fdf0d5;
+  border-bottom:1px solid var(--line);color:#7a4a00;font-size:12px;flex-shrink:0}
+html[data-theme="dark"] #checkBar{background:#3a2e12;color:#f0d79a}
+#checkMsg{flex:1;min-width:0}
+
+/* ---------- 誤操作ロック ---------- */
+html[data-lock="on"] #decks,
+html[data-lock="on"] .pl-wrap,
+html[data-lock="on"] #webPanel,
+html[data-lock="on"] .bar .btn,
+html[data-lock="on"] #btnSetup,
+html[data-lock="on"] #btnMixer,
+html[data-lock="on"] .strip .fader,
+html[data-lock="on"] .strip .btn{pointer-events:none;opacity:.55}
+html[data-lock="on"] #padGrid{outline:2px solid var(--c-sfx);outline-offset:-2px}
+html[data-lock="on"] #btnLock{background:var(--hot);color:#fff;border-color:var(--hot)}
+
 /* =========================================================
    タッチ最適化UI  (data-ui="touch")
    指で確実に押せるサイズへ。情報量よりヒット率を優先する。
@@ -403,6 +461,19 @@ html[data-ui="touch"] .mix-strips{grid-template-columns:1fr}
 html[data-ui="touch"] .knob{grid-template-columns:76px 1fr 60px;margin:10px 0}
 html[data-ui="touch"] #stSave{font-weight:600}
 #stSave.warn{color:var(--hot);font-weight:700}
+html[data-ui="touch"] .tab{font-size:13px;padding:10px 16px;min-height:44px}
+html[data-ui="touch"] .plsearch{padding:10px 12px;font-size:14px;min-height:44px;width:150px}
+html[data-ui="touch"] .cue-item{padding:12px 12px;min-height:60px;gap:11px}
+html[data-ui="touch"] .cue-label{font-size:15px}
+html[data-ui="touch"] .cue-detail{font-size:12px}
+html[data-ui="touch"] .cue-acts{display:flex!important}
+html[data-ui="touch"] .cue-acts .btn{min-width:44px;min-height:42px}
+html[data-ui="touch"] #cueGo{min-width:130px;min-height:56px;font-size:17px}
+html[data-ui="touch"] #cueBar{padding:11px 12px}
+html[data-ui="touch"] #cueNext{font-size:15px}
+html[data-ui="touch"] .auto-row{padding:9px 0;gap:9px}
+html[data-ui="touch"] .auto-row .t,html[data-ui="touch"] .auto-row .o{padding:10px 6px;min-height:44px}
+html[data-ui="touch"] #checkBar{padding:11px 12px;font-size:13.5px}
 
 /* ---------- 画面が狭いとき（タブレット等） ---------- */
 @media (max-width:1000px){
@@ -441,8 +512,11 @@ html[data-ui="touch"] #stSave{font-weight:600}
   <button class="btn q" id="btnSetup" title="出力デバイス・動作設定">設定</button>
   <button class="btn q" id="btnUi" title="マウス用UI / タッチ用UI 切替">マウス</button>
   <button class="btn q" id="btnTheme" title="白 / 黒 切替">◐</button>
+  <button class="btn q" id="btnLock" title="本番中の誤操作を防ぐ（効果音と全停止は使えます）">🔓 ロック</button>
   <button class="btn hot" id="btnPanic" title="すべて停止 (Esc)">■ 全停止</button>
 </header>
+
+<div id="checkBar" style="display:none"><span id="checkMsg"></span><button class="btn sm q" id="checkFix">設定を開く</button></div>
 
 <main>
   <!-- ================= BGM ================= -->
@@ -496,15 +570,36 @@ html[data-ui="touch"] #stSave{font-weight:600}
 
     <div class="pl-wrap">
       <div class="bar">
-        <h3>プレイリスト</h3>
+        <button class="tab on" id="tabList">プレイリスト</button>
+        <button class="tab" id="tabCue">進行表</button>
         <span class="tag" id="plCount">0曲</span>
+        <span class="tag" id="cueCount" style="display:none">0件</span>
         <div class="spacer"></div>
-        <button class="btn sm q" id="plAdd">＋ 追加</button>
-        <button class="btn sm q" id="plFolder">フォルダ</button>
-        <button class="btn sm q" id="plShuffle">シャッフル</button>
-        <button class="btn sm q" id="plClear">クリア</button>
+        <span class="pl-only" style="display:contents">
+          <input class="inp plsearch" id="plSearch" type="search" placeholder="曲名で検索" spellcheck="false">
+          <button class="btn sm q" id="plAdd">＋ 追加</button>
+          <button class="btn sm q" id="plFolder">フォルダ</button>
+          <button class="btn sm q" id="plShuffle">シャッフル</button>
+          <button class="btn sm q" id="plClear">クリア</button>
+        </span>
+        <span class="cue-only" style="display:none">
+          <button class="btn sm q" id="cueAddPlay">＋曲</button>
+          <button class="btn sm q" id="cueAddSfx">＋効果音</button>
+          <button class="btn sm q" id="cueAddFade">＋フェード</button>
+          <button class="btn sm q" id="cueAddNote">＋メモ</button>
+          <button class="btn sm q" id="cueReset">最初から</button>
+          <button class="btn sm q" id="cueClear">クリア</button>
+        </span>
       </div>
       <div id="playlist"></div>
+      <div id="cuePanel" style="display:none">
+        <div id="cueList"></div>
+        <div id="cueBar">
+          <span class="lbl">次</span>
+          <span id="cueNext">— 進行表がありません —</span>
+          <button class="btn" id="cueGo" title="次の項目を実行 (Enter)">GO ⏎</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -590,6 +685,22 @@ html[data-ui="touch"] #stSave{font-weight:600}
       <b>タッチ用UI</b>（ボタンとパッドが大きく指で押しやすい。タブレット・SuperDisplay 向け）を切り替えられます。
     </div>
 
+    <div class="sec">音量の自動そろえ</div>
+    <label class="chk"><input type="checkbox" id="optNorm"><span>曲ごとの音量差を自動でそろえる</span></label>
+    <div class="field" style="margin-top:8px"><label>そろえる音量 <span id="normTargetV"></span></label>
+      <input class="inp" id="normTarget" type="range" min="-30" max="-6" step="1"></div>
+    <div class="hint">ダウンロードした曲は音量がバラバラなので、読み込み時に解析して自動で近づけます（±12dB の範囲、音割れしない範囲で調整）。曲が変わるたびにフェーダーを触らなくて済みます。</div>
+
+    <div class="sec">グローバルホットキー</div>
+    <label class="chk"><input type="checkbox" id="optGhk"><span>AMP が最前面でなくても効果音のキーを効かせる</span></label>
+    <div class="field" style="margin-top:8px"><label>組み合わせるキー</label>
+      <select class="inp" id="ghkMod">
+        <option value="Control+Shift">Ctrl + Shift + パッドのキー</option>
+        <option value="Control+Alt">Ctrl + Alt + パッドのキー</option>
+        <option value="Alt+Shift">Alt + Shift + パッドのキー</option>
+      </select></div>
+    <div class="hint">同じ PC でスライドや資料を出すときに、切り替えた瞬間キーが効かなくなる事故を防げます。<b>単独のキーは奪いません</b>（他のソフトで文字が打てなくなるため）。全停止は <b>組み合わせキー + BackSpace</b> です。.exe 版のみ。</div>
+
     <div class="sec">動作</div>
     <label class="chk"><input type="checkbox" id="optLimiter"><span>リミッターを有効にする（音割れ防止・全バス）</span></label>
     <label class="chk"><input type="checkbox" id="optWake"><span>再生中は PC をスリープさせない</span></label>
@@ -610,6 +721,59 @@ html[data-ui="touch"] #stSave{font-weight:600}
   <h2>ミキサー — 音質調整 <span class="tag">Voicemeeter へ送る前段で処理します</span></h2>
   <div class="body"><div class="mix-strips" id="mixStrips"></div></div>
   <div class="foot"><button class="btn q" id="mixReset">初期値に戻す</button><div class="spacer"></div><button class="btn on" id="mixClose">閉じる</button></div>
+</div></div>
+
+<!-- ================= 曲ごとの設定 ================= -->
+<div class="mask" id="trkMask"><div class="modal" style="width:min(640px,95vw)">
+  <h2>曲の調整 <span class="tag" id="trkName"></span></h2>
+  <div class="body">
+    <div class="sec">イン点 / アウト点</div>
+    <div class="hint" style="margin-bottom:9px">曲頭の無音を飛ばす、イントロを飛ばす、途中で終わらせる、といった設定です。<code>1:23</code> のように入力します。</div>
+    <div class="row2">
+      <div class="field"><label>ここから再生（イン点）</label>
+        <div class="seg"><input class="inp" id="trkIn" value="0:00"><button class="btn sm q" id="trkInNow">今の位置</button></div></div>
+      <div class="field"><label>ここで終わる（アウト点・空欄なら最後まで）</label>
+        <div class="seg"><input class="inp" id="trkOut" placeholder="（最後まで）"><button class="btn sm q" id="trkOutNow">今の位置</button></div></div>
+    </div>
+
+    <div class="sec">音量の自動変化</div>
+    <div class="hint" style="margin-bottom:9px">
+      「<b>この時刻から ◯秒かけて 音量を◯%にする</b>」を並べていきます。曲を再生しながら「今の位置に追加」を押すと、その場所に点が入ります。
+      司会が話す間だけ下げて、終わったら戻す、といった動きを仕込めます。波形の上に変化のカーブが表示されます。
+    </div>
+    <div id="trkAuto"></div>
+    <button class="btn sm q" id="trkAutoAdd" style="margin-top:8px">＋ 今の位置に追加</button>
+
+    <div class="sec">この曲の音量</div>
+    <div class="hint">解析結果: <b id="trkRms"></b></div>
+  </div>
+  <div class="foot">
+    <button class="btn hot" id="trkReset">この曲の設定を初期化</button>
+    <div class="spacer"></div><button class="btn on" id="trkOk">OK</button>
+  </div>
+</div></div>
+
+<!-- ================= キュー編集 ================= -->
+<div class="mask" id="cueMask"><div class="modal" style="width:min(520px,95vw)">
+  <h2>進行表の項目</h2>
+  <div class="body">
+    <div class="field"><label>種類</label>
+      <select class="inp" id="cueKind">
+        <option value="play">曲を再生</option>
+        <option value="fade">フェードアウト</option>
+        <option value="stop">停止</option>
+        <option value="sfx">効果音</option>
+        <option value="note">メモ（音は出ない）</option>
+      </select></div>
+    <div class="field"><label>表示名（空欄なら種類名。「開会式BGM」など進行表として読める名前に）</label>
+      <input class="inp" id="cueLabel" type="text" placeholder="開会式 BGM"></div>
+    <div class="field" id="cueRowTrack"><label>曲</label><select class="inp" id="cueTrack"></select></div>
+    <div class="field" id="cueRowDeck"><label>デッキ</label><select class="inp" id="cueDeck"></select></div>
+    <div class="field" id="cueRowPad"><label>パッド</label><select class="inp" id="cuePad"></select></div>
+    <div class="field" id="cueRowFade"><label>フェード時間 <span id="cueFadeV"></span></label>
+      <input class="inp" id="cueFade" type="range" min="0" max="20" step="0.1"></div>
+  </div>
+  <div class="foot"><div class="spacer"></div><button class="btn on" id="cueOk">OK</button></div>
 </div></div>
 
 <!-- ================= パッド設定 ================= -->

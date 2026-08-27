@@ -51,7 +51,22 @@ const S = {
   limiter:true, wake:true, confirmExit:true, autoAdv:true, autoMix:false,
   cols:5, padCount:20, deckCount:2,
   webVol:1, webOpen:false, webHistory:[],
+  normalize:true,        // 曲ごとの音量を自動でそろえる
+  normTarget:-16,        // そろえる目標ラウドネス(dBFS RMS)
+  locked:false,          // 誤操作ロック
+  ghk:false, ghkMod:'Control+Shift',   // グローバルホットキー
+  tracks:{},             // 曲ごとの設定 { key: {in,out,auto:[{at,to,over}],rms} }
+  cues:[], cueIdx:-1,    // キューリスト（進行表）
+  plTab:'list',          // 'list' | 'cue'
 };
+
+/* 曲ごとの設定は、フォルダ内パス（無ければファイル名）で紐づける */
+const trackKey = it => (it && (it.path || it.name)) || '';
+function trackConf(it, create) {
+  const k = trackKey(it); if (!k) return null;
+  if (!S.tracks[k] && create) S.tracks[k] = { in:0, out:0, auto:[], rms:null };
+  return S.tracks[k] || null;
+}
 
 /* ---------------------------------------------------------
    IndexedDB
@@ -253,9 +268,12 @@ class Deck {
 
     this.audio = new Audio(); this.audio.preload = 'auto';
     this.node  = c.createMediaElementSource(this.audio);
+    this.autoG = c.createGain();      // 曲内の音量オートメーション
+    this.normG = c.createGain();      // 曲ごとの音量そろえ
     this.fadeG = c.createGain();      // フェード / クロスフェード用
     this.volG  = c.createGain();      // ユーザー操作のフェーダー
-    this.node.connect(this.fadeG).connect(this.volG).connect(this.bus.input);
+    this.node.connect(this.autoG).connect(this.normG)
+             .connect(this.fadeG).connect(this.volG).connect(this.bus.input);
 
     this.meta = null; this.url = null; this.peaks = null;
     this.vol = 1; this.loop = false; this.fadeTok = 0; this.waveTok = 0;
@@ -314,6 +332,56 @@ class Deck {
     this.el.classList.toggle('live', this.playing);
   }
 
+  get conf() { return this.meta ? trackConf(this.meta, false) : null; }
+  /* アウト点。未設定なら曲の終わりまで */
+  get outAt() {
+    const c = this.conf, d = this.audio.duration || 0;
+    return (c && c.out > 0 && c.out < d) ? c.out : d;
+  }
+  get inAt() { const c = this.conf; return c && c.in > 0 ? c.in : 0; }
+
+  /* 音量オートメーションの、その時刻での値。
+     点は「at 秒から over 秒かけて to まで変える」の意味で、
+     次の点まではその値を保つ。 */
+  envAt(t) {
+    const c = this.conf;
+    if (!c || !c.auto || !c.auto.length) return 1;
+    const pts = [...c.auto].sort((a, b) => a.at - b.at);
+    let prev = 1;
+    for (const p of pts) {
+      if (t < p.at) return prev;
+      if (p.over > 0 && t < p.at + p.over) return prev + (p.to - prev) * ((t - p.at) / p.over);
+      prev = p.to;
+    }
+    return prev;
+  }
+  /* 毎フレーム呼ばれ、オートメーションの反映とアウト点の監視を行う */
+  tickAuto() {
+    if (!this.audio.src) return;
+    const t = this.audio.currentTime || 0;
+    const g = this.autoG.gain, ct = this.bus.ctx.currentTime;
+    const target = clamp(this.envAt(t), 0, 2);
+    if (Math.abs(g.value - target) > 0.002) g.setTargetAtTime(target, ct, 0.03);
+    if (this.playing) {
+      const out = this.outAt;
+      if (out > 0 && t >= out - 0.02) {
+        if (this.loop) { this.audio.currentTime = this.inAt; }
+        else { this.audio.pause(); this.audio.currentTime = this.inAt; this.sync(); onDeckEnded(this); }
+      }
+    }
+  }
+  /* 曲ごとの音量そろえを反映 */
+  applyNorm() {
+    const c = this.conf, ct = this.bus.ctx.currentTime;
+    let g = 1;
+    if (S.normalize && c && c.rms != null && c.rms > 0) {
+      const rmsDb = 20 * Math.log10(c.rms);
+      g = Math.pow(10, clamp(S.normTarget - rmsDb, -12, 12) / 20);
+      if (c.peak > 0) g = Math.min(g, 0.99 / c.peak);      // 上げすぎて歪ませない
+    }
+    this.normG.gain.setTargetAtTime(clamp(g, 0.05, 4), ct, 0.05);
+  }
+
   async load(src) {
     const file = src.file || (src.handle && await src.handle.getFile());
     if (!file) { toast('ファイルが見つかりません: ' + src.name, true); return false; }
@@ -327,6 +395,13 @@ class Deck {
     this.$name.classList.remove('empty');
     const g = this.fadeG.gain;
     g.cancelScheduledValues(this.bus.ctx.currentTime); g.value = 1;
+    this.autoG.gain.cancelScheduledValues(this.bus.ctx.currentTime);
+    this.autoG.gain.value = this.envAt(0);
+    trackConf(this.meta, true);
+    this.applyNorm();
+    this.audio.addEventListener('loadedmetadata', () => {
+      if (this.inAt > 0) this.audio.currentTime = this.inAt;
+    }, { once:true });
     this.drawWave(); this.buildWave(file);
     renderPlaylist();
     return true;
@@ -376,11 +451,19 @@ class Deck {
       if (tok !== this.waveTok) return;
       const N = 640, ch = buf.getChannelData(0), step = Math.max(1, Math.floor(ch.length / N));
       const pk = new Float32Array(N);
+      let sum = 0, cnt = 0, peak = 0;
       for (let i = 0; i < N; i++) {
         let m = 0; const s = i * step, e = Math.min(s + step, ch.length);
-        for (let j = s; j < e; j += 3) { const a = Math.abs(ch[j]); if (a > m) m = a; }
-        pk[i] = m;
+        for (let j = s; j < e; j += 3) {
+          const v = ch[j], a = Math.abs(v);
+          if (a > m) m = a;
+          sum += v * v; cnt++;
+        }
+        pk[i] = m; if (m > peak) peak = m;
       }
+      // 音量そろえ用に、この曲の実効音量(RMS)とピークを覚えておく
+      const c = trackConf(this.meta, true);
+      if (c) { c.rms = cnt ? Math.sqrt(sum / cnt) : null; c.peak = peak; this.applyNorm(); saveState(); }
       this.peaks = pk; this.drawWave();
     } catch { /* 波形は諦める（再生には影響しない） */ }
   }
@@ -400,6 +483,28 @@ class Deck {
       const h = Math.max(dpr, this.peaks[i] * mid * 1.9);
       g.fillRect(i * w, mid - h, Math.max(dpr, w - dpr * .5), h * 2);
     }
+    const dur = this.audio.duration || 0;
+    if (!dur) return;
+    const c = this.conf;
+    // イン点／アウト点の外側を暗くする
+    g.globalAlpha = .5; g.fillStyle = cs.backgroundColor || '#000';
+    if (this.inAt > 0) g.fillRect(0, 0, (this.inAt / dur) * cv.width, cv.height);
+    if (c && c.out > 0 && c.out < dur) {
+      const x = (c.out / dur) * cv.width;
+      g.fillRect(x, 0, cv.width - x, cv.height);
+    }
+    // 音量オートメーションのカーブ
+    if (c && c.auto && c.auto.length) {
+      g.globalAlpha = .95; g.strokeStyle = cs.color; g.lineWidth = Math.max(1, dpr);
+      g.beginPath();
+      for (let x = 0; x <= cv.width; x += dpr * 2) {
+        const v = clamp(this.envAt((x / cv.width) * dur), 0, 1.3);
+        const y = cv.height - (v / 1.3) * cv.height;
+        x === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+    g.globalAlpha = 1;
   }
 }
 
@@ -449,7 +554,7 @@ async function checkAutoMix() {
   if (!S.autoMix || mixArmed) return;
   for (const d of DECKS) {
     if (!d.playing || d.loop || !d.audio.duration) continue;
-    const rem = d.audio.duration - d.audio.currentTime;
+    const rem = (d.outAt || d.audio.duration) - d.audio.currentTime;
     if (rem > S.fade.xf || rem <= 0) continue;
     const other = DECKS.find(x => x !== d && !x.playing);
     if (!other) continue;
@@ -718,6 +823,7 @@ function pumpDuration() {
     })();
   }
 }
+let plFilter = '';
 function renderPlaylist() {
   const box = $('#playlist');
   $('#plCount').textContent = PL.length + '曲';
@@ -725,15 +831,24 @@ function renderPlaylist() {
     box.innerHTML = '<div class="pl-empty">曲をここにドラッグ＆ドロップ<br>または「フォルダ」でまとめて読み込み</div>';
     return;
   }
+  const q = plFilter.trim().toLowerCase();
   const loaded = new Set(DECKS.map(d => d.meta && d.meta.name).filter(Boolean));
   const frag = document.createDocumentFragment();
+  let shown = 0;
   PL.forEach((it, i) => {
+    if (q && !it.name.toLowerCase().includes(q)) return;
+    shown++;
+    const c = trackConf(it, false);
+    const marks = (c && (c.in > 0 || c.out > 0) ? '✂' : '') + (c && c.auto && c.auto.length ? '⌁' : '');
     const d = document.createElement('div');
     d.className = 'pl-item' + (loaded.has(it.name) ? ' cur' : '');
     d.dataset.i = i;
+    d.draggable = !q;                       // 検索中は並べ替えを無効化（見えている順と実際の順が違うため）
     d.innerHTML = '<span class="pl-no num">' + (i + 1) + '</span><span class="pl-name"></span>' +
+      '<span class="pl-mark">' + marks + '</span>' +
       '<span class="pl-acts">' + DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('') +
       '<button class="btn sm q" data-a="cue" title="ヘッドホンで試聴">試聴</button>' +
+      '<button class="btn sm q" data-a="trk" title="イン点・アウト点・音量の自動変化">調整</button>' +
       '<button class="btn sm q" data-a="del">✕</button></span>' +
       '<span class="pl-dur num">' + (it.dur != null ? fmt(it.dur) : '') + '</span>';
     $('.pl-name', d).textContent = it.name;
@@ -744,12 +859,187 @@ function renderPlaylist() {
       const a = b.dataset.a;
       if (a === 'del') { PL.splice(i, 1); renderPlaylist(); saveState(); return; }
       if (a === 'cue') { playCue(it, i); return; }
+      if (a === 'trk') { openTrackDlg(it); return; }
       const dk = deckOf(a);
       if (dk && await dk.load(it)) { plCursor = i; selectDeck(a); }
     };
+    // ドラッグで並べ替え
+    d.ondragstart = e => { e.dataTransfer.setData('amp/pl', String(i)); e.dataTransfer.effectAllowed = 'move'; d.classList.add('dragging'); };
+    d.ondragend = () => d.classList.remove('dragging');
+    d.ondragover = e => {
+      if (!e.dataTransfer.types.includes('amp/pl')) return;
+      e.preventDefault(); e.stopPropagation();
+      const r = d.getBoundingClientRect();
+      d.classList.toggle('drop-after', e.clientY > r.top + r.height / 2);
+      d.classList.add('drop');
+    };
+    d.ondragleave = () => d.classList.remove('drop', 'drop-after');
+    d.ondrop = e => {
+      if (!e.dataTransfer.types.includes('amp/pl')) return;
+      e.preventDefault(); e.stopPropagation();
+      const from = +e.dataTransfer.getData('amp/pl');
+      const after = d.classList.contains('drop-after');
+      d.classList.remove('drop', 'drop-after');
+      if (!isFinite(from) || from === i) return;
+      const [moved] = PL.splice(from, 1);
+      let to = i + (after ? 1 : 0);
+      if (from < to) to--;
+      PL.splice(clamp(to, 0, PL.length), 0, moved);
+      plCursor = -1;
+      renderPlaylist(); saveState();
+    };
     frag.appendChild(d);
   });
+  if (!shown) {
+    box.innerHTML = '<div class="pl-empty">「' + plFilter + '」に一致する曲がありません</div>';
+    return;
+  }
   box.replaceChildren(frag);
+}
+
+/* ---------------------------------------------------------
+   キューリスト（進行表）
+   進行順に「何をするか」を並べておき、GO（Enter）で1つずつ実行する。
+   当日は順番を覚えなくてよく、担当者が交代しても引き継げる。
+   --------------------------------------------------------- */
+const CUE_KIND = {
+  play:  { label:'曲を再生',        icon:'▶' },
+  fade:  { label:'フェードアウト',  icon:'▼' },
+  stop:  { label:'停止',            icon:'■' },
+  sfx:   { label:'効果音',          icon:'♪' },
+  note:  { label:'メモ（音は出ない）', icon:'·' },
+};
+function addCue(kind, extra = {}) {
+  S.cues.push({ kind, label:'', deck:DECKS[0] ? DECKS[0].id : 'A', fade:S.fade.in, ...extra });
+  renderCues(); saveState();
+}
+function renderCues() {
+  const box = $('#cueList'); if (!box) return;
+  $('#cueCount').textContent = S.cues.length + '件';
+  if (!S.cues.length) {
+    box.innerHTML = '<div class="pl-empty">進行表がまだありません。<br>下の「＋」で項目を足すか、プレイリストの曲を「進行表へ」で追加できます。</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  S.cues.forEach((c, i) => {
+    const k = CUE_KIND[c.kind] || CUE_KIND.note;
+    const row = document.createElement('div');
+    row.className = 'cue-item' + (i === S.cueIdx ? ' done' : '') + (i === S.cueIdx + 1 ? ' next' : '');
+    row.dataset.i = i;
+    row.draggable = true;
+    let detail = '';
+    if (c.kind === 'play') detail = (c.track || '（曲未設定）') + ' → デッキ' + c.deck + '　' + (c.fade > 0 ? c.fade.toFixed(1) + '秒でフェードイン' : '即再生');
+    else if (c.kind === 'fade') detail = 'デッキ' + c.deck + ' を ' + (c.fade || S.fade.out).toFixed(1) + '秒でフェードアウト';
+    else if (c.kind === 'stop') detail = c.deck === '*' ? '全部止める' : 'デッキ' + c.deck + ' を停止';
+    else if (c.kind === 'sfx') detail = 'パッド ' + ((c.pad ?? 0) + 1) + '　' + (PADS[c.pad] && PADS[c.pad].name ? PADS[c.pad].name : '');
+    row.innerHTML =
+      '<span class="cue-no num">' + (i + 1) + '</span>' +
+      '<span class="cue-icon">' + k.icon + '</span>' +
+      '<span class="cue-body"><b class="cue-label"></b><span class="cue-detail"></span></span>' +
+      '<span class="cue-acts">' +
+        '<button class="btn sm q" data-a="go" title="この項目をここから実行">▶</button>' +
+        '<button class="btn sm q" data-a="edit">編集</button>' +
+        '<button class="btn sm q" data-a="del">✕</button></span>';
+    $('.cue-label', row).textContent = c.label || k.label;
+    $('.cue-detail', row).textContent = detail;
+    row.onclick = e => {
+      const b = e.target.closest('button');
+      if (!b) { S.cueIdx = i - 1; renderCues(); saveState(); return; }   // ここまで進んだ扱いにする
+      e.stopPropagation();
+      if (b.dataset.a === 'del') { S.cues.splice(i, 1); if (S.cueIdx >= i) S.cueIdx--; renderCues(); saveState(); }
+      if (b.dataset.a === 'edit') openCueDlg(i);
+      if (b.dataset.a === 'go') { S.cueIdx = i - 1; cueGo(); }
+    };
+    row.ondragstart = e => { e.dataTransfer.setData('amp/cue', String(i)); row.classList.add('dragging'); };
+    row.ondragend = () => row.classList.remove('dragging');
+    row.ondragover = e => {
+      if (!e.dataTransfer.types.includes('amp/cue')) return;
+      e.preventDefault(); e.stopPropagation();
+      const r = row.getBoundingClientRect();
+      row.classList.toggle('drop-after', e.clientY > r.top + r.height / 2);
+      row.classList.add('drop');
+    };
+    row.ondragleave = () => row.classList.remove('drop', 'drop-after');
+    row.ondrop = e => {
+      if (!e.dataTransfer.types.includes('amp/cue')) return;
+      e.preventDefault(); e.stopPropagation();
+      const from = +e.dataTransfer.getData('amp/cue');
+      const after = row.classList.contains('drop-after');
+      row.classList.remove('drop', 'drop-after');
+      if (!isFinite(from) || from === i) return;
+      const [m] = S.cues.splice(from, 1);
+      let to = i + (after ? 1 : 0); if (from < to) to--;
+      S.cues.splice(clamp(to, 0, S.cues.length), 0, m);
+      renderCues(); saveState();
+    };
+    frag.appendChild(row);
+  });
+  box.replaceChildren(frag);
+  updateCueGo();
+  const el = box.querySelector('.cue-item.next');
+  if (el) el.scrollIntoView({ block:'nearest' });
+}
+function updateCueGo() {
+  const nx = S.cues[S.cueIdx + 1];
+  const b = $('#cueGo'); if (!b) return;
+  b.disabled = !nx;
+  const k = nx && (CUE_KIND[nx.kind] || CUE_KIND.note);
+  $('#cueNext').textContent = nx ? (nx.label || k.label) + (nx.track ? '： ' + nx.track : '') : '— 進行表の最後です —';
+}
+async function cueGo() {
+  const c = S.cues[S.cueIdx + 1];
+  if (!c) { toast('進行表の最後です'); return; }
+  S.cueIdx++;
+  try {
+    if (c.kind === 'play') {
+      const dk = deckOf(c.deck) || idleDeck();
+      const it = PL.find(x => trackKey(x) === c.trackKey) || PL.find(x => x.name === c.track);
+      if (!it) { toast('「' + (c.track || '') + '」がプレイリストにありません', true); }
+      else if (await dk.load(it)) { plCursor = PL.indexOf(it); dk.play(c.fade || 0); selectDeck(dk.id); }
+    } else if (c.kind === 'fade') {
+      const dk = deckOf(c.deck); if (dk) dk.fadeStop(c.fade || S.fade.out);
+    } else if (c.kind === 'stop') {
+      if (c.deck === '*') { DECKS.forEach(d => d.stop()); PADS.forEach(p => p.stopAll(60)); }
+      else { const dk = deckOf(c.deck); if (dk) dk.stop(); }
+    } else if (c.kind === 'sfx') {
+      const p = PADS[c.pad]; if (p && p.buffer) p.trigger(); else toast('パッド ' + ((c.pad ?? 0) + 1) + ' は空です', true);
+    }
+  } catch (e) { toast('実行できませんでした: ' + e.message, true); }
+  renderCues(); saveState();
+}
+
+/* キュー編集ダイアログ */
+let cueIdxEdit = -1;
+function openCueDlg(i) {
+  cueIdxEdit = i;
+  const c = S.cues[i];
+  $('#cueKind').value = c.kind;
+  $('#cueLabel').value = c.label || '';
+  const trk = $('#cueTrack');
+  trk.replaceChildren();
+  trk.add(new Option('（選んでください）', ''));
+  PL.forEach(it => trk.add(new Option(it.name, trackKey(it))));
+  trk.value = c.trackKey || '';
+  const dk = $('#cueDeck');
+  dk.replaceChildren();
+  DECKS.forEach(d => dk.add(new Option('デッキ ' + d.id, d.id)));
+  dk.add(new Option('すべて', '*'));
+  dk.value = c.deck || DECKS[0].id;
+  const pd = $('#cuePad');
+  pd.replaceChildren();
+  PADS.forEach((p, n) => pd.add(new Option('パッド ' + (n + 1) + (p.name ? '： ' + p.name : '（空）'), String(n))));
+  pd.value = String(c.pad ?? 0);
+  $('#cueFade').value = c.fade ?? S.fade.in;
+  $('#cueFadeV').textContent = (c.fade ?? S.fade.in).toFixed(1) + ' 秒';
+  syncCueDlg();
+  $('#cueMask').classList.add('show');
+}
+function syncCueDlg() {
+  const k = $('#cueKind').value;
+  $('#cueRowTrack').style.display = k === 'play' ? '' : 'none';
+  $('#cueRowDeck').style.display  = (k === 'play' || k === 'fade' || k === 'stop') ? '' : 'none';
+  $('#cueRowPad').style.display   = k === 'sfx' ? '' : 'none';
+  $('#cueRowFade').style.display  = (k === 'play' || k === 'fade') ? '' : 'none';
 }
 
 /* ---------------------------------------------------------
@@ -1196,6 +1486,31 @@ function applyTheme() {
   requestAnimationFrame(() => DECKS.forEach(d => d.drawWave()));
   pushPadState();
 }
+/* 誤操作ロック。本番中の誤クリックで BGM が止まる事故を防ぐ。
+   効果音のパッドと全停止だけは、ロック中でも使えるようにしておく。 */
+function applyLock() {
+  document.documentElement.dataset.lock = S.locked ? 'on' : 'off';
+  const b = $('#btnLock');
+  if (b) { b.classList.toggle('on', S.locked); b.textContent = S.locked ? '🔒 ロック中' : '🔓 ロック'; }
+}
+
+/* 起動時セルフチェック。当日の朝に気づけるよう、問題があれば画面上部に出す */
+function selfCheck() {
+  const bad = [];
+  for (const [k, name] of [['bgm','BGM'], ['sfx','SE'], ['cue','試聴']]) {
+    const id = S.sinks[k];
+    if (id && !DEVICES.some(d => d.deviceId === id)) bad.push(name + ' に設定した出力先が見つかりません');
+  }
+  if (!DEVICES.length) bad.push('音の出力先が1つも見つかりません');
+  const missing = PADS.filter(p => { const c = p.conf(); return c.path && !p.buffer; }).length;
+  if (missing) bad.push('効果音 ' + missing + ' 個が読み込めていません');
+  const bar = $('#checkBar');
+  if (!bar) return;
+  if (!bad.length) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  $('#checkMsg').textContent = '⚠ ' + bad.join(' / ') + ' — 「設定」で確認してください';
+}
+
 /* マウス用UI ⇄ タッチ用UI の切替。CSS 側で密度と当たり判定をまるごと差し替える */
 function applyUiMode() {
   document.documentElement.dataset.ui = S.ui;
@@ -1219,13 +1534,14 @@ function loop() {
   meter('#mtCue', null, BUS.cue);
 
   for (const d of DECKS) {
+    d.tickAuto();
     const a = d.audio, dur = a.duration || 0, cur = a.currentTime || 0;
     const p = dur ? cur / dur : 0;
     d.$fill.style.width = (p * 100) + '%';
     d.$head.style.left  = (p * 100) + '%';
     if (frame % 3 === 0) {
-      d.$cur.textContent = fmt(cur); d.$dur.textContent = fmt(dur);
-      const rem = Math.max(0, dur - cur);
+      d.$cur.textContent = fmt(cur); d.$dur.textContent = fmt(d.outAt || dur);
+      const rem = Math.max(0, (d.outAt || dur) - cur);   // アウト点までの残り
       d.$rem.textContent = ' -' + fmt(rem);
       d.$rem.classList.toggle('hot', d.playing && dur > 0 && rem <= 15);
     }
@@ -1253,12 +1569,15 @@ function meter(bar, pk, bus) {
   el.classList.toggle('clip', v >= .995);
   if (pk) $(pk).style.left = clamp((20 * Math.log10(Math.max(bus.hold, 1e-5)) + 54) / 57, 0, 1) * 100 + '%';
 }
-/* 最小化中は requestAnimationFrame が止まるため、曲つなぎ・WEB時間表示はタイマーでも更新する */
+/* 最小化中や裏に回っているときは requestAnimationFrame が止まる。
+   音量オートメーション・アウト点・曲つなぎは音に直結するので、
+   描画とは切り離してタイマーでも必ず回す。 */
 setInterval(() => {
+  for (const d of DECKS) d.tickAuto();
   checkAutoMix();
   updateWebTime();
   if (CH && popAlive && Date.now() - popAlive > 4000) popAlive = 0;
-}, 250);
+}, 100);
 
 /* ---------------------------------------------------------
    キーボード
@@ -1277,13 +1596,40 @@ addEventListener('keydown', e => {
   if (e.target.matches('input,select,textarea')) return;
   if (e.code === 'Escape') { e.preventDefault(); panic(); return; }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
-  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) curDeck().toggle(); return; }
+  if (e.code === 'Enter') { e.preventDefault(); if (!e.repeat) cueGo(); return; }   // GO
+  // ロック中はパッドと全停止だけ効かせる（BGM を止める操作は無効）
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat && !S.locked) curDeck().toggle(); return; }
   if (e.code === 'Tab')   { e.preventDefault(); if (!e.repeat) selectDeck(DECK_IDS[(selDeck + 1) % DECKS.length]); return; }
   const i = keyMap.get(e.code);
   if (i == null) return;
   e.preventDefault();
   if (!e.repeat && PADS[i].buffer) PADS[i].trigger();
 });
+
+/* グローバルホットキー（.exe 版のみ）。
+   単独キーを全体に奪うと他アプリで文字が打てなくなるため、必ず修飾キー付きで登録する。 */
+function syncGlobalKeys() {
+  if (!NATIVE || !NATIVE.setGlobalKeys) return;
+  const keys = S.ghk
+    ? PADS.map((p, i) => p.key ? { accel: S.ghkMod + '+' + accelOf(p.key), i } : null).filter(Boolean)
+    : [];
+  NATIVE.setGlobalKeys(keys, S.ghk ? S.ghkMod + '+Backspace' : null)
+    .then(r => {
+      if (!r || !S.ghk) return;
+      if (r.failed && r.failed.length) toast('一部のキーは他のソフトが使用中で登録できませんでした（' + r.failed.length + '個）', true);
+    }).catch(() => {});
+}
+const accelOf = code => {
+  const k = KEY_LAYOUT.find(x => x[0] === code); if (!k) return '';
+  const ch = k[1];
+  return ch === ';' ? 'Semicolon' : ch === ',' ? 'Comma' : ch === '.' ? 'Period' : ch === '/' ? 'Slash' : ch;
+};
+if (NATIVE && NATIVE.onGlobalTrigger) {
+  NATIVE.onGlobalTrigger(i => {
+    if (i === -1) { panic(); return; }
+    const p = PADS[i]; if (p && p.buffer) p.trigger();
+  });
+}
 addEventListener('keyup', e => { const i = keyMap.get(e.code); if (i != null) PADS[i].release(); });
 
 function panic() {
@@ -1341,6 +1687,9 @@ function stateSnapshot() {
     limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
     cols:S.cols, padCount:PADS.length, deckCount:DECKS.length,
     webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
+    normalize:S.normalize, normTarget:S.normTarget, locked:S.locked,
+    ghk:S.ghk, ghkMod:S.ghkMod, tracks:S.tracks,
+    cues:S.cues, cueIdx:S.cueIdx, plTab:S.plTab,
     pads:PADS.map(p => p.conf()),
     playlist:PL.map(it => ({ name:it.name, path:it.path })),
   };
@@ -1385,8 +1734,106 @@ async function restoreState() {
   S.webVol = clamp(d.webVol != null ? +d.webVol : 1, 0, 1);
   S.webOpen = !!d.webOpen;
   S.webHistory = Array.isArray(d.webHistory) ? d.webHistory.slice(0, 12) : [];
+  S.normalize = d.normalize !== false;
+  S.normTarget = clamp(d.normTarget != null ? +d.normTarget : -16, -30, -6);
+  S.locked = !!d.locked;
+  S.ghk = !!d.ghk;
+  S.ghkMod = ['Control+Shift','Control+Alt','Alt+Shift'].includes(d.ghkMod) ? d.ghkMod : 'Control+Shift';
+  S.tracks = (d.tracks && typeof d.tracks === 'object') ? d.tracks : {};
+  S.cues = Array.isArray(d.cues) ? d.cues : [];
+  S.cueIdx = Number.isInteger(d.cueIdx) ? clamp(d.cueIdx, -1, S.cues.length - 1) : -1;
+  S.plTab = d.plTab === 'cue' ? 'cue' : 'list';
   return d;
 }
+/* ---------------------------------------------------------
+   曲ごとの設定（イン点 / アウト点 / 音量オートメーション）
+   --------------------------------------------------------- */
+let trkItem = null;
+const secToStr = s => fmt(s || 0);
+function strToSec(v) {
+  const m = String(v).trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  return m ? (+(m[1] || 0)) * 60 + (+m[2]) : NaN;
+}
+/* その曲が今どのデッキに載っているか（あれば現在位置を取れる） */
+const deckOfTrack = it => DECKS.find(d => d.meta && trackKey(d.meta) === trackKey(it));
+
+function openTrackDlg(it) {
+  trkItem = it;
+  const c = trackConf(it, true);
+  $('#trkName').textContent = it.name;
+  $('#trkIn').value = secToStr(c.in);
+  $('#trkOut').value = c.out > 0 ? secToStr(c.out) : '';
+  $('#trkRms').textContent = c.rms != null
+    ? (20 * Math.log10(c.rms)).toFixed(1) + ' dB（自動そろえ ' + (S.normalize ? '有効' : '無効') + '）'
+    : '未解析（デッキに読み込むと解析されます）';
+  renderAutoList();
+  $('#trkMask').classList.add('show');
+}
+function renderAutoList() {
+  const c = trackConf(trkItem, true), box = $('#trkAuto');
+  box.replaceChildren();
+  const pts = c.auto.sort((a, b) => a.at - b.at);
+  if (!pts.length) {
+    box.innerHTML = '<div class="hint">まだありません。曲を再生しながら「今の位置に追加」を押すと、その時点からの音量変化を作れます。</div>';
+    return;
+  }
+  pts.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'auto-row';
+    row.innerHTML =
+      '<input class="inp t" value="' + secToStr(p.at) + '" title="開始時刻">' +
+      '<span class="lbl">から</span>' +
+      '<input class="inp o" type="number" min="0" max="60" step="0.5" value="' + p.over + '" title="かける秒数">' +
+      '<span class="lbl">秒かけて</span>' +
+      '<input class="inp v" type="range" min="0" max="1.3" step="0.01" value="' + p.to + '">' +
+      '<span class="val num">' + Math.round(p.to * 100) + '%</span>' +
+      '<button class="btn sm q x">削除</button>';
+    const redraw = () => { DECKS.forEach(d => d.drawWave()); saveState(); };
+    $('.t', row).onchange = e => { const v = strToSec(e.target.value); if (isFinite(v)) { p.at = v; renderAutoList(); redraw(); } };
+    $('.o', row).oninput = e => { p.over = Math.max(0, +e.target.value); redraw(); };
+    $('.v', row).oninput = e => { p.to = +e.target.value; $('.val', row).textContent = Math.round(p.to * 100) + '%'; redraw(); };
+    $('.x', row).onclick = () => { c.auto.splice(c.auto.indexOf(p), 1); renderAutoList(); redraw(); };
+    box.appendChild(row);
+  });
+}
+function bindTrackDlg() {
+  $('#trkOk').onclick = () => { $('#trkMask').classList.remove('show'); saveState(); };
+  $('#trkMask').onclick = e => { if (e.target.id === 'trkMask') { e.target.classList.remove('show'); saveState(); } };
+  const apply = () => { DECKS.forEach(d => { d.drawWave(); d.applyNorm(); }); saveState(); };
+  $('#trkIn').onchange = e => {
+    const v = strToSec(e.target.value); const c = trackConf(trkItem, true);
+    c.in = isFinite(v) ? Math.max(0, v) : 0; e.target.value = secToStr(c.in); apply();
+  };
+  $('#trkOut').onchange = e => {
+    const c = trackConf(trkItem, true);
+    if (!e.target.value.trim()) { c.out = 0; apply(); return; }
+    const v = strToSec(e.target.value);
+    c.out = isFinite(v) ? Math.max(0, v) : 0; e.target.value = c.out ? secToStr(c.out) : ''; apply();
+  };
+  $('#trkInNow').onclick = () => {
+    const d = deckOfTrack(trkItem); if (!d) { toast('この曲をデッキに読み込むと現在位置を取得できます', true); return; }
+    const c = trackConf(trkItem, true); c.in = d.audio.currentTime; $('#trkIn').value = secToStr(c.in); apply();
+  };
+  $('#trkOutNow').onclick = () => {
+    const d = deckOfTrack(trkItem); if (!d) { toast('この曲をデッキに読み込むと現在位置を取得できます', true); return; }
+    const c = trackConf(trkItem, true); c.out = d.audio.currentTime; $('#trkOut').value = secToStr(c.out); apply();
+  };
+  $('#trkAutoAdd').onclick = () => {
+    const d = deckOfTrack(trkItem);
+    const c = trackConf(trkItem, true);
+    const at = d ? d.audio.currentTime : (c.auto.length ? c.auto[c.auto.length - 1].at + 10 : 0);
+    c.auto.push({ at, to: 0.4, over: 3 });
+    renderAutoList(); apply();
+  };
+  $('#trkReset').onclick = () => {
+    const c = trackConf(trkItem, true);
+    c.in = 0; c.out = 0; c.auto = [];
+    $('#trkIn').value = '0:00'; $('#trkOut').value = '';
+    renderAutoList(); apply();
+    toast('この曲の設定を初期化しました');
+  };
+}
+
 /* ---------------------------------------------------------
    手動保存 / 読込（.ampset）
    設定・パッドの割当・効果音の音源そのものを 1 ファイルにまとめる。
@@ -1521,6 +1968,7 @@ function relinkPlaylist(saved) {
 /* ---------------------------------------------------------
    UI 結線
    --------------------------------------------------------- */
+const AMP = {};          // 初期化後に他所から呼びたい関数の置き場
 let applyVol = () => {};
 function bindUI() {
   applyVol = () => {
@@ -1577,6 +2025,15 @@ function bindUI() {
   range('#xfTime', '#xfTimeV',  () => S.fade.xf,  v => S.fade.xf = v,  v => v.toFixed(1) + ' 秒');
 
   const chk = (id, get, set) => { const e = $(id); e.checked = get(); e.onchange = () => { set(e.checked); saveState(); }; };
+  range('#normTarget','#normTargetV', () => S.normTarget, v => { S.normTarget = v; DECKS.forEach(d => d.applyNorm()); }, v => v + ' dB');
+  chk('#optNorm', () => S.normalize, v => { S.normalize = v; DECKS.forEach(d => d.applyNorm()); });
+  chk('#optGhk', () => S.ghk, v => { S.ghk = v; syncGlobalKeys(); });
+  $('#ghkMod').value = S.ghkMod;
+  $('#ghkMod').onchange = e => { S.ghkMod = e.target.value; syncGlobalKeys(); saveState(); };
+  if (!NATIVE || !NATIVE.setGlobalKeys) {
+    $('#optGhk').disabled = true; $('#ghkMod').disabled = true;
+    $('#optGhk').parentElement.style.opacity = '.5';
+  }
   chk('#optLimiter', () => S.limiter, v => { S.limiter = v; ALL_BUSES.forEach(b => b.applyLimiter()); });
   chk('#optWake', () => S.wake, v => { S.wake = v; updateWakeLock(); });
   chk('#optConfirmExit', () => S.confirmExit, v => S.confirmExit = v);
@@ -1585,6 +2042,58 @@ function bindUI() {
   $('#deckPlus').onclick  = () => { buildDecks(DECKS.length + 1); renderPlaylist(); saveState(); };
   $('#deckMinus').onclick = () => { buildDecks(DECKS.length - 1); renderPlaylist(); saveState(); };
   $('#btnAutoMix').onclick = e => { S.autoMix = !S.autoMix; e.target.classList.toggle('on', S.autoMix); saveState(); };
+
+  /* タブ（プレイリスト / 進行表） */
+  const setTab = t => {
+    S.plTab = t;
+    $('#tabList').classList.toggle('on', t === 'list');
+    $('#tabCue').classList.toggle('on', t === 'cue');
+    $('#playlist').style.display = t === 'list' ? '' : 'none';
+    $('#cuePanel').style.display = t === 'cue' ? '' : 'none';
+    $('#plCount').style.display = t === 'list' ? '' : 'none';
+    $('#cueCount').style.display = t === 'cue' ? '' : 'none';
+    $$('.pl-only').forEach(e => e.style.display = t === 'list' ? 'contents' : 'none');
+    $$('.cue-only').forEach(e => e.style.display = t === 'cue' ? 'contents' : 'none');
+    saveState();
+  };
+  $('#tabList').onclick = () => setTab('list');
+  $('#tabCue').onclick  = () => setTab('cue');
+  AMP.setTab = setTab;
+
+  $('#plSearch').oninput = e => { plFilter = e.target.value; renderPlaylist(); };
+
+  /* 進行表 */
+  $('#cueGo').onclick = cueGo;
+  $('#cueAddPlay').onclick = () => { addCue('play', { fade:S.fade.in }); openCueDlg(S.cues.length - 1); };
+  $('#cueAddSfx').onclick  = () => { addCue('sfx', { pad:0 }); openCueDlg(S.cues.length - 1); };
+  $('#cueAddFade').onclick = () => { addCue('fade', { fade:S.fade.out }); openCueDlg(S.cues.length - 1); };
+  $('#cueAddNote').onclick = () => { addCue('note'); openCueDlg(S.cues.length - 1); };
+  $('#cueReset').onclick = () => { S.cueIdx = -1; renderCues(); saveState(); toast('進行表を最初に戻しました'); };
+  $('#cueClear').onclick = () => { if (confirm('進行表をすべて消します。よろしいですか？')) { S.cues = []; S.cueIdx = -1; renderCues(); saveState(); } };
+  $('#cueKind').onchange = syncCueDlg;
+  $('#cueFade').oninput = e => $('#cueFadeV').textContent = (+e.target.value).toFixed(1) + ' 秒';
+  $('#cueOk').onclick = () => {
+    const c = S.cues[cueIdxEdit]; if (!c) { $('#cueMask').classList.remove('show'); return; }
+    c.kind = $('#cueKind').value;
+    c.label = $('#cueLabel').value.trim();
+    c.trackKey = $('#cueTrack').value;
+    const it = PL.find(x => trackKey(x) === c.trackKey);
+    c.track = it ? it.name : '';
+    c.deck = $('#cueDeck').value;
+    c.pad = +$('#cuePad').value;
+    c.fade = +$('#cueFade').value;
+    $('#cueMask').classList.remove('show');
+    renderCues(); saveState();
+  };
+  $('#cueMask').onclick = e => { if (e.target.id === 'cueMask') e.target.classList.remove('show'); };
+  bindTrackDlg();
+
+  /* ロック / セルフチェック */
+  $('#btnLock').onclick = () => {
+    S.locked = !S.locked; applyLock(); saveState();
+    toast(S.locked ? 'ロックしました（効果音と全停止は使えます）' : 'ロックを解除しました');
+  };
+  $('#checkFix').onclick = async () => { $('#setupMask').classList.add('show'); await refreshDevices(); };
 
   $('#plAdd').onclick    = async () => { const f = await pickFiles(true); if (f.length) addToPlaylist(f); };
   $('#plFolder').onclick = async () => { const f = await pickFolder(); if (f) { PL = []; addToPlaylist(f); } };
@@ -1760,7 +2269,10 @@ function bindUpdater() {
   ALL_BUSES.forEach(b => b.applyLimiter());
   applyAllEq(); applyVol(); duckState = true; updateDuck();
 
+  applyLock();
   renderPlaylist();
+  renderCues();
+  AMP.setTab(S.plTab);
   await refreshDevices();
   await applySinks();
   updateLatency(); updateMem(); updateWakeLock();
@@ -1781,5 +2293,7 @@ function bindUpdater() {
   } else {
     setStatus(SINK_OK ? '準備完了 — 「設定」から出力先を選べます' : 'この環境では出力先を個別に指定できません');
   }
+  selfCheck();
+  syncGlobalKeys();
   loop();
 })();

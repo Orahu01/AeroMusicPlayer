@@ -24,4 +24,8 @@ contextBridge.exposeInMainWorld('ampNative', {
   /* 手動保存 / 読込（.ampset ファイル） */
   saveFile: (defaultName, bytes) => ipcRenderer.invoke('save-file', defaultName, bytes),
   openFile: () => ipcRenderer.invoke('open-file'),
+
+  /* グローバルホットキー（他アプリを操作中でも効果音を鳴らす） */
+  setGlobalKeys: (keys, panicAccel) => ipcRenderer.invoke('set-global-keys', keys, panicAccel),
+  onGlobalTrigger: (cb) => ipcRenderer.on('global-trigger', (_e, i) => cb(i)),
 });

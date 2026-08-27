@@ -11,7 +11,7 @@
    ユーザーが「再起動して適用」を押した時だけ入れ替える（本番中に勝手に落ちない）。
    ========================================================= */
 'use strict';
-const { app, BrowserWindow, session, shell, dialog } = require('electron');
+const { app, BrowserWindow, session, shell, dialog, globalShortcut } = require('electron');
 const { ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
@@ -159,6 +159,28 @@ function createWindow(urlPath, opts = {}) {
   return win;
 }
 
+/* ---------------- グローバルホットキー ----------------
+   AMP が最前面でなくても効果音を鳴らせるようにする。
+   スライドや資料を同じ PC で出しているときの取りこぼし防止。
+   単独キーを奪うと他アプリで文字入力ができなくなるので、
+   必ず修飾キー付きのアクセラレータのみ受け付ける。 */
+function wireGlobalKeys() {
+  ipcMain.handle('set-global-keys', (_e, keys, panicAccel) => {
+    globalShortcut.unregisterAll();
+    const failed = [];
+    const send = i => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('global-trigger', i); };
+    for (const k of keys || []) {
+      if (!k.accel || !/\+/.test(k.accel)) continue;     // 修飾キーなしは拒否
+      try { if (!globalShortcut.register(k.accel, () => send(k.i))) failed.push(k.accel); }
+      catch { failed.push(k.accel); }
+    }
+    if (panicAccel && /\+/.test(panicAccel)) {
+      try { if (!globalShortcut.register(panicAccel, () => send(-1))) failed.push(panicAccel); } catch { failed.push(panicAccel); }
+    }
+    return { registered: (keys || []).length - failed.length, failed };
+  });
+}
+
 /* ---------------- 自動更新 ---------------- */
 function sendUpdateStatus(status) {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('update-status', status);
@@ -198,6 +220,7 @@ if (!app.requestSingleInstanceLock()) {
 
     ensureStore();
     wireStore();
+    wireGlobalKeys();
     wireUpdater();
     try {
       await startServer();
@@ -212,6 +235,8 @@ if (!app.requestSingleInstanceLock()) {
     // 起動から少し待って自動チェック（起動直後の帯域を再生準備と取り合わないように）
     if (app.isPackaged) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 4000);
   });
+
+  app.on('will-quit', () => globalShortcut.unregisterAll());
 
   app.on('window-all-closed', () => {
     if (server) server.close();

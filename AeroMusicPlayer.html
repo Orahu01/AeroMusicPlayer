@@ -322,6 +322,88 @@ footer b{color:var(--fg)}
   background:var(--surface);border:2px dashed var(--line);font-size:17px;font-weight:700;pointer-events:none}
 #drop.show{display:grid}
 
+/* =========================================================
+   タッチ最適化UI  (data-ui="touch")
+   指で確実に押せるサイズへ。情報量よりヒット率を優先する。
+   ========================================================= */
+html[data-ui="touch"]{ --r:7px; }
+html[data-ui="touch"] body{font-size:15px}
+html[data-ui="touch"] .btn{padding:11px 16px;min-height:46px;font-size:14px;border-width:1.5px}
+html[data-ui="touch"] .btn.sm{padding:9px 13px;min-height:40px;font-size:13px}
+html[data-ui="touch"] .btn.icon{padding:11px 14px}
+html[data-ui="touch"] header{height:auto;min-height:66px;padding:8px 12px;gap:8px;flex-wrap:wrap}
+html[data-ui="touch"] .brand .n{font-size:17px}
+html[data-ui="touch"] .brand{display:none}          /* 幅を実操作へ回す */
+html[data-ui="touch"] .strip{padding:6px 11px;gap:9px}
+html[data-ui="touch"] .strip .nm{font-size:12px;width:34px}
+html[data-ui="touch"] .strip .fader{width:120px}
+html[data-ui="touch"] .strip .btn.sm{min-width:44px;min-height:44px}
+html[data-ui="touch"] .meter{width:70px;height:10px}
+
+/* フェーダーは指でつまめる大きさに */
+html[data-ui="touch"] .fader{height:6px;border-radius:3px}
+html[data-ui="touch"] .fader::-webkit-slider-thumb{width:26px;height:34px;border-radius:5px;border-width:2px}
+html[data-ui="touch"] input.inp[type=range]{height:6px}
+
+html[data-ui="touch"] .bar{padding:9px 12px;min-height:52px;gap:9px}
+html[data-ui="touch"] .bar h3{font-size:13px}
+html[data-ui="touch"] .tag{font-size:12px;padding:4px 9px}
+html[data-ui="touch"] .lbl{font-size:12px}
+html[data-ui="touch"] .val{font-size:12px;width:52px}
+
+/* デッキ：行を分けて、再生系ボタンを大きく */
+html[data-ui="touch"] #decks{max-height:52%}
+html[data-ui="touch"] .deck{padding:11px 12px}
+html[data-ui="touch"] .d-id{width:30px;height:30px;font-size:14px}
+html[data-ui="touch"] .d-name{font-size:15px}
+html[data-ui="touch"] .d-time{font-size:13px}
+html[data-ui="touch"] .d-seek{height:42px}
+html[data-ui="touch"] .d-ctrl{gap:7px;margin-top:9px;flex-wrap:wrap}
+html[data-ui="touch"] .d-ctrl .play{min-width:66px!important;font-size:17px}
+html[data-ui="touch"] .d-ctrl .stop{min-width:56px!important;font-size:16px}
+html[data-ui="touch"] .d-ctrl .fader{width:110px}
+
+/* プレイリスト：行を厚く、操作ボタンは常時表示（hover が無いため） */
+html[data-ui="touch"] .pl-item{padding:11px 12px;gap:11px;min-height:56px}
+html[data-ui="touch"] .pl-no{font-size:12px;width:26px}
+html[data-ui="touch"] .pl-dur{font-size:12px}
+html[data-ui="touch"] .pl-acts{display:flex!important;gap:5px}
+html[data-ui="touch"] .pl-item .pl-acts .btn{min-width:44px;min-height:42px;padding:8px 11px}
+html[data-ui="touch"] .pl-empty{font-size:14px;padding:34px 18px}
+
+/* パッド：一番よく叩く場所なので最優先で大きく */
+html[data-ui="touch"] #padGrid{gap:11px;padding:12px}
+html[data-ui="touch"] .pad{min-height:118px;padding:11px 12px 11px 17px;border-width:1.5px}
+html[data-ui="touch"] .pad::before{width:6px}
+html[data-ui="touch"] .pad:hover{transform:none;box-shadow:var(--sh-1)}   /* 指では hover が残るので無効化 */
+html[data-ui="touch"] .pad:active{transform:scale(.97)}
+html[data-ui="touch"] .p-name{font-size:15px;-webkit-line-clamp:3;padding-right:34px}
+html[data-ui="touch"] .p-key{font-size:12px;line-height:22px;min-width:24px;padding:0 7px;top:6px;right:7px}
+html[data-ui="touch"] .p-meta{font-size:11.5px}
+html[data-ui="touch"] .p-prog{height:4px}
+html[data-ui="touch"] .pad.empty{font-size:13px}
+
+/* WEB / モーダル / 下部 */
+html[data-ui="touch"] #webStage{height:230px}
+html[data-ui="touch"] .web-row .inp{padding:11px 12px;font-size:14px}
+html[data-ui="touch"] .wh{padding:9px 6px;font-size:13px}
+html[data-ui="touch"] .modal h2{font-size:16px;padding:15px 18px}
+html[data-ui="touch"] .modal .body{padding:17px 18px}
+html[data-ui="touch"] .modal .foot{padding:13px 18px}
+html[data-ui="touch"] .field>label{font-size:13px;margin-bottom:7px}
+html[data-ui="touch"] .hint{font-size:12.5px}
+html[data-ui="touch"] select.inp,html[data-ui="touch"] input.inp{padding:11px 12px;font-size:14px;min-height:46px}
+html[data-ui="touch"] .chk{padding:9px 0;font-size:14px}
+html[data-ui="touch"] .chk input{width:22px;height:22px}
+html[data-ui="touch"] .sw{width:38px;height:38px}
+html[data-ui="touch"] .seg .btn{min-width:96px}
+html[data-ui="touch"] footer{height:34px;font-size:12px}
+html[data-ui="touch"] footer .kbd{display:none}        /* キーボード前提の案内は隠す */
+html[data-ui="touch"] .mix-strips{grid-template-columns:1fr}
+html[data-ui="touch"] .knob{grid-template-columns:76px 1fr 60px;margin:10px 0}
+html[data-ui="touch"] #stSave{font-weight:600}
+#stSave.warn{color:var(--hot);font-weight:700}
+
 /* ---------- 画面が狭いとき（タブレット等） ---------- */
 @media (max-width:1000px){
   main{flex-direction:column}
@@ -357,6 +439,7 @@ footer b{color:var(--fg)}
   <button class="btn q" id="btnDuck" title="SE再生中にBGMを自動で下げる">DUCK</button>
   <button class="btn q" id="btnMixer" title="音質調整">ミキサー</button>
   <button class="btn q" id="btnSetup" title="出力デバイス・動作設定">設定</button>
+  <button class="btn q" id="btnUi" title="マウス用UI / タッチ用UI 切替">マウス</button>
   <button class="btn q" id="btnTheme" title="白 / 黒 切替">◐</button>
   <button class="btn hot" id="btnPanic" title="すべて停止 (Esc)">■ 全停止</button>
 </header>
@@ -447,6 +530,7 @@ footer b{color:var(--fg)}
 <footer>
   <span id="stMsg">起動中…</span>
   <div class="spacer"></div>
+  <span id="stSave">—</span>
   <span>遅延 <b id="stLat">-</b></span>
   <span>SR <b id="stSr">-</b></span>
   <span>SE <b id="stMem">0</b></span>
@@ -485,6 +569,25 @@ footer b{color:var(--fg)}
       <div class="field"><label>フェードイン <span id="fadeInV"></span></label><input class="inp" id="fadeIn" type="range" min="0" max="10" step="0.1"></div>
       <div class="field"><label>フェードアウト <span id="fadeOutV"></span></label><input class="inp" id="fadeOut" type="range" min="0" max="15" step="0.1"></div>
       <div class="field"><label>クロスフェード <span id="xfTimeV"></span></label><input class="inp" id="xfTime" type="range" min="0.2" max="20" step="0.1"></div>
+    </div>
+
+    <div class="sec">保存とバックアップ</div>
+    <div class="hint" style="margin-bottom:9px">
+      設定・パッドの割当・<b>登録した効果音そのもの</b>は操作するたびに自動保存され、次回そのまま復元されます。
+      本番前のバックアップや、別の PC へ持っていくときは下のボタンでファイルに書き出せます。
+    </div>
+    <div class="seg" style="margin-bottom:8px">
+      <button class="btn" id="setSaveNow">今すぐ保存</button>
+      <button class="btn" id="setExport">セットを書き出す</button>
+      <button class="btn" id="setImport">セットを読み込む</button>
+      <button class="btn q" id="setReveal">保存先を開く</button>
+    </div>
+    <div class="hint" style="margin-bottom:4px">「セットを読み込む」は現在の設定と効果音を<b>置き換えます</b>（確認あり）。</div>
+
+    <div class="sec">画面</div>
+    <div class="hint" style="margin-bottom:6px">
+      右上のボタンで <b>マウス用UI</b>（情報が多く一覧しやすい）と
+      <b>タッチ用UI</b>（ボタンとパッドが大きく指で押しやすい。タブレット・SuperDisplay 向け）を切り替えられます。
     </div>
 
     <div class="sec">動作</div>

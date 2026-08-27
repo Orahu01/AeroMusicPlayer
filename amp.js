@@ -41,6 +41,7 @@ const EQ_DEFAULT = () => ({ on:false, hp:20, low:0, mid:0, midF:1000, high:0,
                             comp:false, thr:-18, ratio:3, makeup:0 });
 const S = {
   theme:'light',
+  ui:'mouse',            // 'mouse' = 従来の高密度UI / 'touch' = タッチ最適化UI
   sinks:{ bgm:'', sfx:'', cue:'' },
   duck:{ on:false, amount:9, release:600 },
   fade:{ in:1.5, out:2.5, xf:4 },
@@ -76,11 +77,59 @@ const DB = (() => {
   };
 })();
 
-/* SE の音源そのものを保存しておき、次回起動時にそのまま復元する */
+/* ---------------------------------------------------------
+   保存層
+   Electron 版: userData 配下の実ファイル（ポートやプロファイルが
+                変わっても消えない。手動バックアップもできる）
+   ブラウザ版 : IndexedDB
+   --------------------------------------------------------- */
+const NATIVE = (typeof window !== 'undefined' && window.ampNative) || null;
+const NSTORE = NATIVE && NATIVE.store ? NATIVE.store : null;
 const PAD_BLOB_MAX = 60 << 20;
 const padBlobKey = i => 'padblob:' + i;
-const savePadBlob = (i, f) => { if (f && f.size <= PAD_BLOB_MAX) DB.set(padBlobKey(i), f).catch(() => {}); };
-const loadPadBlob = i => DB.get(padBlobKey(i)).catch(() => null);
+
+const STORE = {
+  kind: NSTORE ? 'file' : 'idb',
+  async getState() {
+    if (NSTORE) {
+      const s = await NSTORE.getState().catch(() => null);
+      if (s) return s;
+      // 旧バージョン（IndexedDB 保存）からの引き継ぎ
+      const legacy = await DB.get('state').catch(() => null);
+      if (legacy) { await this.setState(legacy).catch(() => {}); return legacy; }
+      return null;
+    }
+    return DB.get('state').catch(() => null);
+  },
+  async setState(obj) {
+    if (NSTORE) return NSTORE.setState(JSON.stringify(obj));
+    return DB.set('state', obj);
+  },
+  async getPad(i) {
+    if (NSTORE) {
+      const r = await NSTORE.getPad(i).catch(() => null);
+      if (r && r.bytes) return new File([new Uint8Array(r.bytes)], r.name || ('pad-' + i));
+      const legacy = await DB.get(padBlobKey(i)).catch(() => null);   // 旧保存からの引き継ぎ
+      if (legacy) { this.setPad(i, legacy); return legacy; }
+      return null;
+    }
+    return DB.get(padBlobKey(i)).catch(() => null);
+  },
+  async setPad(i, file) {
+    if (!file || file.size > PAD_BLOB_MAX) return;
+    if (NSTORE) {
+      const ab = await file.arrayBuffer();
+      return NSTORE.setPad(i, new Uint8Array(ab), file.name || ('pad-' + i + '.bin')).catch(() => {});
+    }
+    return DB.set(padBlobKey(i), file).catch(() => {});
+  },
+  async delPad(i) {
+    if (NSTORE) { NSTORE.delPad(i).catch(() => {}); }
+    return DB.del(padBlobKey(i)).catch(() => {});
+  },
+};
+const savePadBlob = (i, f) => { STORE.setPad(i, f); };
+const loadPadBlob = i => STORE.getPad(i);
 
 /* ---------------------------------------------------------
    バス（AudioContext 1個 = 出力デバイス1個）
@@ -1147,6 +1196,17 @@ function applyTheme() {
   requestAnimationFrame(() => DECKS.forEach(d => d.drawWave()));
   pushPadState();
 }
+/* マウス用UI ⇄ タッチ用UI の切替。CSS 側で密度と当たり判定をまるごと差し替える */
+function applyUiMode() {
+  document.documentElement.dataset.ui = S.ui;
+  const b = $('#btnUi');
+  if (b) {
+    b.classList.toggle('on', S.ui === 'touch');
+    b.textContent = S.ui === 'touch' ? 'タッチ' : 'マウス';
+    b.title = S.ui === 'touch' ? 'タッチ最適化UI（クリックでマウス用に戻す）' : 'マウス用UI（クリックでタッチ最適化に切替）';
+  }
+  requestAnimationFrame(() => DECKS.forEach(d => d.drawWave()));
+}
 
 /* ---------------------------------------------------------
    メインループ
@@ -1270,23 +1330,48 @@ async function pickForPad(i) {
 /* ---------------------------------------------------------
    保存 / 復元
    --------------------------------------------------------- */
-let saveT = 0;
+let saveT = 0, lastSaved = 0;
+/* セット読込中は自動保存を止める。
+   読み込んだ直後に reload すると beforeunload の保存が走り、
+   まだ古いままのメモリ上の状態で上書きしてしまうため。 */
+let saveSuspended = false;
+function stateSnapshot() {
+  return {
+    theme:S.theme, ui:S.ui, sinks:S.sinks, duck:S.duck, fade:S.fade, vol:S.vol, mute:S.mute, eq:S.eq,
+    limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
+    cols:S.cols, padCount:PADS.length, deckCount:DECKS.length,
+    webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
+    pads:PADS.map(p => p.conf()),
+    playlist:PL.map(it => ({ name:it.name, path:it.path })),
+  };
+}
+/* 自動保存。操作のたびに呼ばれるので 400ms まとめてから書き込む */
 function saveState() {
+  if (saveSuspended) return;
   clearTimeout(saveT);
-  saveT = setTimeout(() => {
-    DB.set('state', {
-      theme:S.theme, sinks:S.sinks, duck:S.duck, fade:S.fade, vol:S.vol, mute:S.mute, eq:S.eq,
-      limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
-      cols:S.cols, padCount:PADS.length, deckCount:DECKS.length,
-      webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
-      pads:PADS.map(p => p.conf()),
-      playlist:PL.map(it => ({ name:it.name, path:it.path })),
-    }).catch(() => {});
+  saveT = setTimeout(async () => {
+    if (saveSuspended) return;
+    try { await STORE.setState(stateSnapshot()); lastSaved = Date.now(); markSaved(); }
+    catch { markSaved('保存に失敗しました'); }
   }, 400);
 }
+/* 終了時など、待たずに今すぐ書き込む */
+async function saveStateNow() {
+  if (saveSuspended) return;
+  clearTimeout(saveT);
+  try { await STORE.setState(stateSnapshot()); lastSaved = Date.now(); markSaved(); } catch {}
+}
+function markSaved(err) {
+  const el = $('#stSave'); if (!el) return;
+  if (err) { el.textContent = err; el.classList.add('warn'); return; }
+  const d = new Date(lastSaved);
+  el.textContent = '保存済 ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  el.classList.remove('warn');
+}
 async function restoreState() {
-  const d = await DB.get('state').catch(() => null);
+  const d = await STORE.getState();
   if (!d) return null;
+  S.ui = d.ui === 'touch' ? 'touch' : 'mouse';
   S.theme = d.theme === 'dark' ? 'dark' : 'light';
   Object.assign(S.sinks, d.sinks || {}); Object.assign(S.duck, d.duck || {});
   Object.assign(S.fade, d.fade || {});   Object.assign(S.vol, d.vol || {});
@@ -1302,6 +1387,101 @@ async function restoreState() {
   S.webHistory = Array.isArray(d.webHistory) ? d.webHistory.slice(0, 12) : [];
   return d;
 }
+/* ---------------------------------------------------------
+   手動保存 / 読込（.ampset）
+   設定・パッドの割当・効果音の音源そのものを 1 ファイルにまとめる。
+   USB で別の PC へ持っていく、本番前の状態をバックアップする、といった用途。
+   --------------------------------------------------------- */
+const b64enc = buf => {
+  const b = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const b64dec = str => {
+  const bin = atob(str), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+async function exportSet() {
+  try {
+    toast('セットを書き出しています…');
+    const pads = [];
+    for (let i = 0; i < PADS.length; i++) {
+      if (!PADS[i].buffer) continue;
+      const f = await STORE.getPad(i);
+      if (!f) continue;
+      pads.push({ i, name: f.name || ('pad-' + i), type: f.type || '', data: b64enc(await f.arrayBuffer()) });
+    }
+    const bundle = { amp:'ampset', v:1, savedAt:new Date().toISOString(), state:stateSnapshot(), pads };
+    const bytes = new TextEncoder().encode(JSON.stringify(bundle));
+    const name = 'AMP-セット-' + new Date().toISOString().slice(0, 10) + '.ampset';
+
+    if (NATIVE && NATIVE.saveFile) {
+      const p = await NATIVE.saveFile(name, bytes);
+      toast(p ? '保存しました: ' + p : '保存をやめました');
+      return;
+    }
+    if (window.showSaveFilePicker) {
+      const h = await showSaveFilePicker({ suggestedName:name,
+        types:[{ description:'AeroMusic セット', accept:{ 'application/json':['.ampset'] } }] });
+      const w = await h.createWritable(); await w.write(bytes); await w.close();
+      toast('保存しました: ' + h.name);
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type:'application/json' }));
+    a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('保存しました: ' + name);
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('書き出しに失敗しました: ' + e.message, true);
+  }
+}
+
+async function importSet() {
+  try {
+    let bytes = null, label = '';
+    if (NATIVE && NATIVE.openFile) {
+      const r = await NATIVE.openFile();
+      if (!r) return;
+      bytes = new Uint8Array(r.bytes); label = r.name;
+    } else if (window.showOpenFilePicker) {
+      const [h] = await showOpenFilePicker({ types:[{ description:'AeroMusic セット', accept:{ 'application/json':['.ampset'] } }] });
+      const f = await h.getFile(); bytes = new Uint8Array(await f.arrayBuffer()); label = f.name;
+    } else {
+      const f = await new Promise(res => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = '.ampset,application/json';
+        inp.onchange = () => res(inp.files[0]); inp.oncancel = () => res(null);
+        inp.click();
+      });
+      if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer()); label = f.name;
+    }
+    const bundle = JSON.parse(new TextDecoder().decode(bytes));
+    if (!bundle || bundle.amp !== 'ampset' || !bundle.state) { toast('AMP のセットファイルではありません', true); return; }
+    if (!confirm('「' + label + '」を読み込みます。\n現在の設定と効果音は置き換わります。よろしいですか？')) return;
+
+    panic();
+    // ここから reload までの間に自動保存が走ると、読み込んだ内容を
+    // 古いメモリ上の状態で上書きしてしまうので完全に止める
+    saveSuspended = true;
+    clearTimeout(saveT);
+    toast('セットを読み込んでいます…');
+    await STORE.setState(bundle.state);
+    for (let i = 0; i < MAX_PADS; i++) await STORE.delPad(i);
+    for (const p of bundle.pads || []) {
+      await STORE.setPad(p.i, new File([b64dec(p.data)], p.name, { type:p.type || 'audio/*' }));
+    }
+    await new Promise(r => setTimeout(r, 200));
+    location.reload();
+  } catch (e) {
+    saveSuspended = false;
+    if (e.name !== 'AbortError') toast('読込に失敗しました: ' + e.message, true);
+  }
+}
+
 async function reconnectLibrary(interactive) {
   const h = await DB.get('root').catch(() => null);
   if (!h) return false;
@@ -1359,6 +1539,16 @@ function bindUI() {
   $('#btnPanic').onclick = panic;
   $('#btnDuck').onclick = e => { S.duck.on = !S.duck.on; e.target.classList.toggle('on', S.duck.on); duckState = !duckState; updateDuck(); saveState(); };
   $('#btnTheme').onclick = () => { S.theme = S.theme === 'light' ? 'dark' : 'light'; applyTheme(); saveState(); };
+  $('#btnUi').onclick = () => {
+    S.ui = S.ui === 'touch' ? 'mouse' : 'touch';
+    applyUiMode(); saveState();
+    toast(S.ui === 'touch' ? 'タッチ最適化UIに切り替えました' : 'マウス用UIに切り替えました');
+  };
+  $('#setExport').onclick = exportSet;
+  $('#setImport').onclick = importSet;
+  $('#setSaveNow').onclick = async () => { await saveStateNow(); toast('現在の状態を保存しました'); };
+  const rev = $('#setReveal');
+  if (NSTORE) rev.onclick = () => NSTORE.reveal(); else rev.style.display = 'none';
   $('#btnMixer').onclick = () => $('#mixMask').classList.add('show');
   $('#mixClose').onclick = () => $('#mixMask').classList.remove('show');
   $('#mixReset').onclick = () => { S.eq.bgm = EQ_DEFAULT(); S.eq.sfx = EQ_DEFAULT(); buildMixer(); applyAllEq(); saveState(); toast('ミキサーを初期値に戻しました'); };
@@ -1475,8 +1665,11 @@ function bindUI() {
 
   addEventListener('beforeunload', e => {
     if (CH) CH.postMessage({ t:'close' });
+    saveStateNow();      // 閉じる直前の状態を取りこぼさない
     if (S.confirmExit && (DECKS.some(d => d.playing) || voiceCount() > 0 || webPlaying())) { e.preventDefault(); e.returnValue = ''; }
   });
+  // タブ/ウィンドウが隠れた時にも保存（強制終了・電源断への保険）
+  addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveStateNow(); });
   addEventListener('resize', () => DECKS.forEach(d => d.drawWave()));
 }
 
@@ -1550,6 +1743,7 @@ function bindUpdater() {
 (async function init() {
   const saved = await restoreState();
   applyTheme();
+  applyUiMode();
   buildDecks(S.deckCount);
   buildPads(S.padCount);
   bindUI();

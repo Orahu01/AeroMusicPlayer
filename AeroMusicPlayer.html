@@ -330,6 +330,8 @@ footer b{color:var(--fg)}
   border-radius:var(--r);padding:4px 8px;color:var(--fg);outline:none}
 .plsearch:focus{border-color:var(--line)}
 .pl-mark{font-size:11px;color:var(--c-bgm);flex-shrink:0;letter-spacing:1px}
+.pl-item.missing .pl-name{color:var(--hot);text-decoration:line-through}
+.pl-item.missing::after{content:"見つかりません";font-size:10px;color:var(--hot);flex-shrink:0}
 .pl-item.dragging,.cue-item.dragging{opacity:.4}
 .pl-item.drop,.cue-item.drop{box-shadow:inset 0 2px 0 var(--c-bgm)}
 .pl-item.drop.drop-after,.cue-item.drop.drop-after{box-shadow:inset 0 -2px 0 var(--c-bgm)}

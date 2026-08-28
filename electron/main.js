@@ -110,6 +110,17 @@ function wireStore() {
   });
   ipcMain.handle('store-reveal', () => { ensureStore(); shell.openPath(STORE_DIR); });
 
+  /* プレイリストの曲を、覚えておいた実ファイルパスから読み直す。
+     曲そのものをコピーして持たずに済むので、何十曲あっても保存領域を圧迫しない。 */
+  ipcMain.handle('read-file', (_e, p) => {
+    try {
+      if (typeof p !== 'string' || !p) return null;
+      const st = fs.statSync(p);
+      if (!st.isFile() || st.size > (512 << 20)) return null;
+      return { name: path.basename(p), bytes: fs.readFileSync(p) };
+    } catch { return null; }
+  });
+
   // 手動保存 / 読込用のファイルダイアログ
   ipcMain.handle('save-file', async (_e, defaultName, bytes) => {
     const r = await dialog.showSaveDialog(mainWin, {

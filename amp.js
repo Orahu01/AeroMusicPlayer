@@ -60,8 +60,33 @@ const S = {
   plTab:'list',          // 'list' | 'cue'
 };
 
-/* 曲ごとの設定は、フォルダ内パス（無ければファイル名）で紐づける */
-const trackKey = it => (it && (it.path || it.name)) || '';
+/* 曲ごとの設定は、実ファイルパス → フォルダ内パス → ファイル名 の順で紐づける */
+const trackKey = it => (it && (it.fsPath || it.path || it.name)) || '';
+
+/* 曲の実体（File）を必要になった時点で用意する。
+   ドラッグ＆ドロップで入れた曲も、実ファイルパスを覚えておけば
+   次回起動時にそこから読み直せる（曲データ自体は複製しない）。 */
+async function ensureFile(it) {
+  if (!it) return null;
+  if (it.file) return it.file;
+  if (it.handle) { try { return await it.handle.getFile(); } catch { return null; } }
+  if (it.fsPath && NATIVE && NATIVE.readFile) {
+    const r = await NATIVE.readFile(it.fsPath).catch(() => null);
+    if (r && r.bytes) { it.file = new File([new Uint8Array(r.bytes)], r.name || it.name); return it.file; }
+    it.missing = true;
+  }
+  return null;
+}
+/* ドロップやファイル選択で入ってきた File から実パスを拾って覚える */
+function stampPath(items) {
+  if (!NATIVE || !NATIVE.pathForFile) return items;
+  for (const it of items) {
+    if (it.fsPath || !it.file) continue;
+    const p = NATIVE.pathForFile(it.file);
+    if (p) it.fsPath = p;
+  }
+  return items;
+}
 function trackConf(it, create) {
   const k = trackKey(it); if (!k) return null;
   if (!S.tracks[k] && create) S.tracks[k] = { in:0, out:0, auto:[], rms:null };
@@ -383,8 +408,8 @@ class Deck {
   }
 
   async load(src) {
-    const file = src.file || (src.handle && await src.handle.getFile());
-    if (!file) { toast('ファイルが見つかりません: ' + src.name, true); return false; }
+    const file = await ensureFile(src);
+    if (!file) { toast('ファイルが見つかりません: ' + src.name, true); renderPlaylist(); return false; }
     this.audio.pause();
     if (this.url) URL.revokeObjectURL(this.url);
     this.url = URL.createObjectURL(file);
@@ -758,7 +783,7 @@ function pickFiles(multiple = true) {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.multiple = multiple;
     inp.accept = 'audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.opus';
-    inp.onchange = () => res([...inp.files].map(f => ({ file:f, name:f.name, path:null })));
+    inp.onchange = () => res(stampPath([...inp.files].map(f => ({ file:f, name:f.name, path:null }))));
     inp.oncancel = () => res([]);
     inp.click();
   });
@@ -783,7 +808,7 @@ async function filesFromDataTransfer(dt) {
     for (const f of dt.files || []) if (AUDIO_EXT.test(f.name)) out.push({ file:f, name:f.name, path:null });
   }
   out.sort((a, b) => (a.path || a.name).localeCompare(b.path || b.name, 'ja', { numeric:true }));
-  return out;
+  return stampPath(out);
 }
 
 /* ---------------------------------------------------------
@@ -794,6 +819,7 @@ const durQ = []; let durRunning = 0;
 
 function addToPlaylist(items) {
   const from = PL.length;
+  stampPath(items);                    // 実ファイルパスを覚えておく（次回起動時の復元用）
   for (const it of items) PL.push({ ...it });
   renderPlaylist(); saveState();
   for (let i = from; i < PL.length; i++) { durQ.push(i); }
@@ -806,7 +832,7 @@ function pumpDuration() {
     durRunning++;
     (async () => {
       try {
-        const f = it.file || (it.handle && await it.handle.getFile());
+        const f = await ensureFile(it);
         if (!f) throw 0;
         const u = URL.createObjectURL(f), a = new Audio();
         a.preload = 'metadata'; a.src = u;
@@ -841,8 +867,9 @@ function renderPlaylist() {
     const c = trackConf(it, false);
     const marks = (c && (c.in > 0 || c.out > 0) ? '✂' : '') + (c && c.auto && c.auto.length ? '⌁' : '');
     const d = document.createElement('div');
-    d.className = 'pl-item' + (loaded.has(it.name) ? ' cur' : '');
+    d.className = 'pl-item' + (loaded.has(it.name) ? ' cur' : '') + (it.missing ? ' missing' : '');
     d.dataset.i = i;
+    if (it.missing) d.title = 'ファイルが見つかりません: ' + (it.fsPath || it.name);
     d.draggable = !q;                       // 検索中は並べ替えを無効化（見えている順と実際の順が違うため）
     d.innerHTML = '<span class="pl-no num">' + (i + 1) + '</span><span class="pl-name"></span>' +
       '<span class="pl-mark">' + marks + '</span>' +
@@ -1053,7 +1080,8 @@ const CUE = (() => {
 async function playCue(it, idx) {
   resumeAll();
   try {
-    const f = it.file || await it.handle.getFile();
+    const f = await ensureFile(it);
+    if (!f) { toast('ファイルが見つかりません: ' + it.name, true); return; }
     if (CUE.url) URL.revokeObjectURL(CUE.url);
     CUE.url = URL.createObjectURL(f); CUE.audio.src = CUE.url;
     await CUE.audio.play();
@@ -1691,7 +1719,7 @@ function stateSnapshot() {
     ghk:S.ghk, ghkMod:S.ghkMod, tracks:S.tracks,
     cues:S.cues, cueIdx:S.cueIdx, plTab:S.plTab,
     pads:PADS.map(p => p.conf()),
-    playlist:PL.map(it => ({ name:it.name, path:it.path })),
+    playlist:PL.map(it => ({ name:it.name, path:it.path, fsPath:it.fsPath })),
   };
 }
 /* 自動保存。操作のたびに呼ばれるので 400ms まとめてから書き込む */
@@ -1955,10 +1983,17 @@ async function restorePads(saved) {
   rebuildKeyMap();
   return n;
 }
+/* プレイリストの復元。
+   ・フォルダから読み込んだ曲 … 再接続したフォルダのハンドルから
+   ・ドラッグ＆ドロップした曲 … 覚えておいた実ファイルパスから読み直す
+   実体は必要になった時点で読むので、曲数が多くても起動は遅くならない。 */
 function relinkPlaylist(saved) {
   if (!saved) return 0;
   const pl = [];
-  for (const it of saved.playlist || []) if (it.path && LIB.has(it.path)) pl.push({ name:it.name, path:it.path, handle:LIB.get(it.path) });
+  for (const it of saved.playlist || []) {
+    if (it.path && LIB.has(it.path)) pl.push({ name:it.name, path:it.path, fsPath:it.fsPath, handle:LIB.get(it.path) });
+    else if (it.fsPath && NATIVE && NATIVE.readFile) pl.push({ name:it.name, path:it.path, fsPath:it.fsPath });
+  }
   if (!pl.length) return 0;
   PL = pl; renderPlaylist();
   PL.forEach((_, i) => durQ.push(i)); pumpDuration();
@@ -2278,7 +2313,8 @@ function bindUpdater() {
   updateLatency(); updateMem(); updateWakeLock();
 
   const r = await reconnectLibrary(false);
-  const songs = r === true ? relinkPlaylist(saved) : 0;
+  // フォルダを再接続できなくても、実ファイルパスを覚えている曲は戻せる
+  const songs = relinkPlaylist(saved);
   const se = await restorePads(saved);
   if (se || songs) toast('前回の構成を復元しました（効果音 ' + se + '個 / 曲 ' + songs + '曲）');
 

@@ -1,7 +1,7 @@
 /* レンダラー（amp.js）に安全な最小限の橋渡しだけを公開する。
    nodeIntegration は無効なので、ここを通さない限り Node.js には触れられない。 */
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('ampNative', {
   platform: 'electron',
@@ -24,6 +24,11 @@ contextBridge.exposeInMainWorld('ampNative', {
   /* 手動保存 / 読込（.ampset ファイル） */
   saveFile: (defaultName, bytes) => ipcRenderer.invoke('save-file', defaultName, bytes),
   openFile: () => ipcRenderer.invoke('open-file'),
+
+  /* 曲の実ファイルパスを覚えて、次回起動時にそこから読み直すための橋渡し。
+     プレイリストの曲を毎回入れ直さずに済ませるために使う。 */
+  pathForFile: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch { return ''; } },
+  readFile: (p) => ipcRenderer.invoke('read-file', p),
 
   /* グローバルホットキー（他アプリを操作中でも効果音を鳴らす） */
   setGlobalKeys: (keys, panicAccel) => ipcRenderer.invoke('set-global-keys', keys, panicAccel),

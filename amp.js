@@ -49,7 +49,7 @@ const S = {
   mute:{ bgm:false, sfx:false },
   eq:{ bgm:EQ_DEFAULT(), sfx:EQ_DEFAULT() },
   limiter:true, wake:true, confirmExit:true, autoAdv:true, autoMix:false,
-  cols:5, padCount:20, deckCount:2,
+  cols:5, padRows:4, padRowsAuto:true, padPage:0, padCount:20, deckCount:2,
   webVol:1, webOpen:false, webHistory:[],
   normalize:true,        // 曲ごとの音量を自動でそろえる
   normTarget:-16,        // そろえる目標ラウドネス(dBFS RMS)
@@ -741,16 +741,52 @@ function stealOldestVoice() {
   for (const p of PADS) for (const v of p.voices) if (!o || v.t0 < o.t0) o = v;
   if (o) try { o.s.stop(); } catch {}
 }
+/* 実際に使う段数。自動なら「押しやすい高さ」から画面に入る段数を割り出す */
+let effRows = 4;
+function calcRows() {
+  if (!S.padRowsAuto) return clamp(S.padRows, 1, 8);
+  const g = $('#padGrid'); if (!g) return S.padRows;
+  const cs = getComputedStyle(g);
+  const avail = g.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
+  if (!(avail > 60)) return S.padRows;                 // まだ描画前
+  const gap = parseFloat(cs.rowGap || 0) || 0;
+  const target = S.ui === 'touch' ? 94 : 80;           // 1段あたりの目標の高さ
+  return clamp(Math.floor((avail + gap) / (target + gap)), 1, 8);
+}
+const padsPerPage = () => Math.max(1, S.cols * effRows);
+const padPageCount = () => Math.max(1, Math.ceil(PADS.length / padsPerPage()));
+
+/* パッドはスクロールさせず、画面にぴったり収める。
+   指でなぞる操作＝スクロール、という誤解が起きないようにするため
+   （パッドの上をなぞってもスクロールできないのは操作として最悪なので、
+   そもそもスクロールを不要にする）。入りきらない分はページで切り替える。 */
+function layoutPads() {
+  const grid = $('#padGrid');
+  effRows = calcRows();
+  S.padPage = clamp(S.padPage, 0, padPageCount() - 1);
+  const per = padsPerPage(), from = S.padPage * per, to = from + per;
+  grid.style.setProperty('--cols', S.cols);
+  grid.style.setProperty('--rows', Math.min(effRows, Math.ceil((Math.min(to, PADS.length) - from) / S.cols) || 1));
+  PADS.forEach((p, i) => { p.el.style.display = (i >= from && i < to) ? '' : 'none'; });
+  const multi = padPageCount() > 1;
+  $('#padPager').style.display = multi ? '' : 'none';
+  $('#padPageV').textContent = (S.padPage + 1) + ' / ' + padPageCount();
+  $('#padPrev').disabled = S.padPage <= 0;
+  $('#padNext').disabled = S.padPage >= padPageCount() - 1;
+  const rl = $('#padRowsV');
+  if (rl) rl.textContent = S.padRowsAuto ? '自動 ' + effRows : String(effRows);
+  $('#padRows').value = effRows;
+  padsDirty = true;
+}
 function buildPads(n) {
   n = clamp(n, 1, MAX_PADS);
   const grid = $('#padGrid');
   while (PADS.length < n) { const p = new Pad(PADS.length); PADS.push(p); grid.appendChild(p.el); }
   while (PADS.length > n) { const p = PADS.pop(); p.stopAll(0); p.el.remove(); }
   S.padCount = PADS.length;
-  grid.style.setProperty('--cols', S.cols);
   $('#padMinus').disabled = PADS.length <= S.cols;
   $('#padPlus').disabled = PADS.length >= MAX_PADS;
-  rebuildKeyMap(); padsDirty = true;
+  rebuildKeyMap(); layoutPads();
 }
 
 /* ---------------------------------------------------------
@@ -870,10 +906,15 @@ function renderPlaylist() {
     d.className = 'pl-item' + (loaded.has(it.name) ? ' cur' : '') + (it.missing ? ' missing' : '');
     d.dataset.i = i;
     if (it.missing) d.title = 'ファイルが見つかりません: ' + (it.fsPath || it.name);
-    d.draggable = !q;                       // 検索中は並べ替えを無効化（見えている順と実際の順が違うため）
+    // タッチ時は HTML5 ドラッグを付けない（指でのスクロールを奪ってしまうため）。
+    // 代わりに ▲▼ ボタンで並べ替える。検索中は順序が実際と違うので無効。
+    const canDrag = !q && S.ui !== 'touch';
+    d.draggable = canDrag;
     d.innerHTML = '<span class="pl-no num">' + (i + 1) + '</span><span class="pl-name"></span>' +
       '<span class="pl-mark">' + marks + '</span>' +
-      '<span class="pl-acts">' + DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('') +
+      '<span class="pl-acts">' +
+      (canDrag || q ? '' : '<button class="btn sm q" data-a="up" title="上へ">▲</button><button class="btn sm q" data-a="dn" title="下へ">▼</button>') +
+      DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('') +
       '<button class="btn sm q" data-a="cue" title="ヘッドホンで試聴">試聴</button>' +
       '<button class="btn sm q" data-a="trk" title="イン点・アウト点・音量の自動変化">調整</button>' +
       '<button class="btn sm q" data-a="del">✕</button></span>' +
@@ -887,6 +928,12 @@ function renderPlaylist() {
       if (a === 'del') { PL.splice(i, 1); renderPlaylist(); saveState(); return; }
       if (a === 'cue') { playCue(it, i); return; }
       if (a === 'trk') { openTrackDlg(it); return; }
+      if (a === 'up' || a === 'dn') {
+        const to = i + (a === 'up' ? -1 : 1);
+        if (to < 0 || to >= PL.length) return;
+        [PL[i], PL[to]] = [PL[to], PL[i]];
+        plCursor = -1; renderPlaylist(); saveState(); return;
+      }
       const dk = deckOf(a);
       if (dk && await dk.load(it)) { plCursor = i; selectDeck(a); }
     };
@@ -953,7 +1000,8 @@ function renderCues() {
     const row = document.createElement('div');
     row.className = 'cue-item' + (i === S.cueIdx ? ' done' : '') + (i === S.cueIdx + 1 ? ' next' : '');
     row.dataset.i = i;
-    row.draggable = true;
+    const canDrag = S.ui !== 'touch';        // タッチではドラッグを付けない（スクロールを奪うため）
+    row.draggable = canDrag;
     let detail = '';
     if (c.kind === 'play') detail = (c.track || '（曲未設定）') + ' → デッキ' + c.deck + '　' + (c.fade > 0 ? c.fade.toFixed(1) + '秒でフェードイン' : '即再生');
     else if (c.kind === 'fade') detail = 'デッキ' + c.deck + ' を ' + (c.fade || S.fade.out).toFixed(1) + '秒でフェードアウト';
@@ -964,6 +1012,7 @@ function renderCues() {
       '<span class="cue-icon">' + k.icon + '</span>' +
       '<span class="cue-body"><b class="cue-label"></b><span class="cue-detail"></span></span>' +
       '<span class="cue-acts">' +
+        (canDrag ? '' : '<button class="btn sm q" data-a="up" title="上へ">▲</button><button class="btn sm q" data-a="dn" title="下へ">▼</button>') +
         '<button class="btn sm q" data-a="go" title="この項目をここから実行">▶</button>' +
         '<button class="btn sm q" data-a="edit">編集</button>' +
         '<button class="btn sm q" data-a="del">✕</button></span>';
@@ -973,9 +1022,16 @@ function renderCues() {
       const b = e.target.closest('button');
       if (!b) { S.cueIdx = i - 1; renderCues(); saveState(); return; }   // ここまで進んだ扱いにする
       e.stopPropagation();
-      if (b.dataset.a === 'del') { S.cues.splice(i, 1); if (S.cueIdx >= i) S.cueIdx--; renderCues(); saveState(); }
-      if (b.dataset.a === 'edit') openCueDlg(i);
-      if (b.dataset.a === 'go') { S.cueIdx = i - 1; cueGo(); }
+      const a = b.dataset.a;
+      if (a === 'del') { S.cues.splice(i, 1); if (S.cueIdx >= i) S.cueIdx--; renderCues(); saveState(); }
+      if (a === 'edit') openCueDlg(i);
+      if (a === 'go') { S.cueIdx = i - 1; cueGo(); }
+      if (a === 'up' || a === 'dn') {
+        const to = i + (a === 'up' ? -1 : 1);
+        if (to < 0 || to >= S.cues.length) return;
+        [S.cues[i], S.cues[to]] = [S.cues[to], S.cues[i]];
+        renderCues(); saveState();
+      }
     };
     row.ondragstart = e => { e.dataTransfer.setData('amp/cue', String(i)); row.classList.add('dragging'); };
     row.ondragend = () => row.classList.remove('dragging');
@@ -1466,7 +1522,7 @@ const CH = ('BroadcastChannel' in self) ? new BroadcastChannel('amp-pads') : nul
 let padsDirty = true, popWin = null, popAlive = 0;
 
 function padState() {
-  return { t:'state', cols:S.cols, theme:S.theme,
+  return { t:'state', cols:S.cols, rows:S.padRows, theme:S.theme,
     pads: PADS.map(p => ({ i:p.i, name:p.name, key:p.keyLabel, color:p.color,
       mode:MODE_LABEL[p.mode] + (p.loop ? ' ↻' : ''), loaded:!!p.buffer, playing:p.voices.size })) };
 }
@@ -1548,6 +1604,8 @@ function applyUiMode() {
     b.textContent = S.ui === 'touch' ? 'タッチ' : 'マウス';
     b.title = S.ui === 'touch' ? 'タッチ最適化UI（クリックでマウス用に戻す）' : 'マウス用UI（クリックでタッチ最適化に切替）';
   }
+  // 行のドラッグ可否がモードで変わるので、リストを組み直す
+  if (PADS.length) { renderPlaylist(); renderCues(); layoutPads(); }
   requestAnimationFrame(() => DECKS.forEach(d => d.drawWave()));
 }
 
@@ -1713,7 +1771,8 @@ function stateSnapshot() {
   return {
     theme:S.theme, ui:S.ui, sinks:S.sinks, duck:S.duck, fade:S.fade, vol:S.vol, mute:S.mute, eq:S.eq,
     limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
-    cols:S.cols, padCount:PADS.length, deckCount:DECKS.length,
+    cols:S.cols, padRows:S.padRows, padRowsAuto:S.padRowsAuto, padPage:S.padPage,
+    padCount:PADS.length, deckCount:DECKS.length,
     webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
     normalize:S.normalize, normTarget:S.normTarget, locked:S.locked,
     ghk:S.ghk, ghkMod:S.ghkMod, tracks:S.tracks,
@@ -1756,7 +1815,11 @@ async function restoreState() {
   if (d.eq) { Object.assign(S.eq.bgm, d.eq.bgm || {}); Object.assign(S.eq.sfx, d.eq.sfx || {}); }
   S.limiter = d.limiter !== false; S.wake = d.wake !== false;
   S.confirmExit = d.confirmExit !== false; S.autoAdv = d.autoAdv !== false;
-  S.autoMix = !!d.autoMix; S.cols = d.cols || 5;
+  S.autoMix = !!d.autoMix;
+  S.cols = clamp(d.cols || 5, 2, 9);
+  S.padRows = clamp(d.padRows || 4, 1, 8);
+  S.padRowsAuto = d.padRowsAuto !== false;
+  S.padPage = Math.max(0, d.padPage | 0);
   S.deckCount = clamp(d.deckCount || 2, 1, MAX_DECKS);
   S.padCount = clamp(d.padCount || 20, 1, MAX_PADS);
   S.webVol = clamp(d.webVol != null ? +d.webVol : 1, 0, 1);
@@ -2135,7 +2198,16 @@ function bindUI() {
   $('#plShuffle').onclick = () => { for (let i = PL.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [PL[i], PL[j]] = [PL[j], PL[i]]; } plCursor = -1; renderPlaylist(); saveState(); };
   $('#plClear').onclick  = () => { PL = []; plCursor = -1; renderPlaylist(); saveState(); };
 
-  $('#padCols').oninput = e => { S.cols = +e.target.value; $('#padGrid').style.setProperty('--cols', S.cols); padsDirty = true; saveState(); };
+  $('#padCols').oninput = e => { S.cols = +e.target.value; layoutPads(); saveState(); };
+  $('#padRows').oninput = e => { S.padRowsAuto = false; S.padRows = +e.target.value; layoutPads(); saveState(); };
+  $('#padRowsAuto').onclick = () => {
+    S.padRowsAuto = !S.padRowsAuto;
+    $('#padRowsAuto').classList.toggle('on', S.padRowsAuto);
+    layoutPads(); saveState();
+    toast(S.padRowsAuto ? '段数を画面の高さから自動で決めます' : '段数を手動で指定します');
+  };
+  $('#padPrev').onclick = () => { S.padPage--; layoutPads(); saveState(); };
+  $('#padNext').onclick = () => { S.padPage++; layoutPads(); saveState(); };
   $('#padPlus').onclick  = () => { buildPads(PADS.length + S.cols); saveState(); };
   $('#padMinus').onclick = () => { buildPads(PADS.length - S.cols); saveState(); };
   $('#sfxStopAll').onclick = () => { PADS.forEach(p => p.stopAll(80)); toast('効果音を停止しました'); };
@@ -2214,7 +2286,7 @@ function bindUI() {
   });
   // タブ/ウィンドウが隠れた時にも保存（強制終了・電源断への保険）
   addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveStateNow(); });
-  addEventListener('resize', () => DECKS.forEach(d => d.drawWave()));
+  addEventListener('resize', () => { layoutPads(); DECKS.forEach(d => d.drawWave()); });
 }
 
 let wakeLock = null;
@@ -2301,6 +2373,10 @@ function bindUpdater() {
   $('#btnDuck').classList.toggle('on', S.duck.on);
   $('#btnAutoMix').classList.toggle('on', S.autoMix);
   $('#padCols').value = S.cols;
+  $('#padRows').value = S.padRows;
+  $('#padRowsAuto').classList.toggle('on', S.padRowsAuto);
+  layoutPads();
+  requestAnimationFrame(layoutPads);      // 実寸が確定してから段数を決め直す
   ALL_BUSES.forEach(b => b.applyLimiter());
   applyAllEq(); applyVol(); duckState = true; updateDuck();
 

@@ -41,11 +41,13 @@ header .st.live{color:#2f7a3a}
 .btn.hot:active{background:var(--hot);color:#fff}
 
 /* この画面はタブレットを指で叩く前提なので、常にタッチ寸法にする */
-#grid{flex:1;display:grid;gap:11px;padding:12px;overflow-y:auto;align-content:start;
-  grid-template-columns:repeat(var(--cols,5),1fr)}
+/* スクロールさせない。画面に敷き詰めて、余りはページ送り */
+#grid{flex:1;min-height:0;display:grid;gap:11px;padding:12px;overflow:hidden;
+  grid-template-columns:repeat(var(--cols,5),1fr);
+  grid-template-rows:repeat(var(--rows,4),minmax(0,1fr))}
 .pad{
   position:relative;border:1.5px solid var(--line);border-radius:7px;background:var(--surface);
-  min-height:124px;padding:11px 12px 11px 17px;display:flex;flex-direction:column;
+  min-height:0;padding:11px 12px 11px 17px;display:flex;flex-direction:column;
   touch-action:none;overflow:hidden;
 }
 .pad::before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:var(--pc,transparent)}
@@ -69,6 +71,11 @@ footer{display:flex;align-items:center;gap:10px;padding:0 12px;height:30px;flex-
 <header>
   <span class="n">AMP パッド</span>
   <span class="st" id="st">接続待ち…</span>
+  <span id="pager" style="display:none;align-items:center;gap:6px">
+    <button class="btn" id="prev">◀</button>
+    <span class="st" id="pageV">1 / 1</span>
+    <button class="btn" id="next">▶</button>
+  </span>
   <div class="spacer"></div>
   <button class="btn" id="theme">◐</button>
   <button class="btn" id="stopSfx">SE停止</button>
@@ -81,10 +88,23 @@ footer{display:flex;align-items:center;gap:10px;padding:0 12px;height:30px;flex-
 const $ = s => document.querySelector(s);
 const grid = $('#grid'), stEl = $('#st');
 const CH = new BroadcastChannel('amp-pads');
-let cols = 5, pads = [];
+let cols = 5, rows = 4, page = 0, pads = [];
 
+const perPage = () => Math.max(1, cols * rows);
+const pageCount = () => Math.max(1, Math.ceil(pads.length / perPage()));
+
+/* この窓はスクロールさせない。指でなぞる操作は必ず「パッドを鳴らす」になる。
+   入りきらない分はページ送りで出す。 */
 function render() {
+  page = Math.min(Math.max(page, 0), pageCount() - 1);
+  const per = perPage(), from = page * per, to = Math.min(from + per, pads.length);
   grid.style.setProperty('--cols', cols);
+  grid.style.setProperty('--rows', Math.min(rows, Math.ceil((to - from) / cols) || 1));
+  const multi = pageCount() > 1;
+  $('#pager').style.display = multi ? '' : 'none';
+  $('#pageV').textContent = (page + 1) + ' / ' + pageCount();
+  $('#prev').disabled = page <= 0;
+  $('#next').disabled = page >= pageCount() - 1;
   const need = pads.length;
   while (grid.children.length < need) {
     const d = document.createElement('div');
@@ -95,6 +115,7 @@ function render() {
   while (grid.children.length > need) grid.lastChild.remove();
   pads.forEach((p, i) => {
     const el = grid.children[i];
+    el.style.display = (i >= from && i < to) ? '' : 'none';
     el.style.setProperty('--pc', p.color || 'transparent');
     el.classList.toggle('empty', !p.loaded);
     el.classList.toggle('playing', !!p.playing);
@@ -116,13 +137,15 @@ CH.onmessage = ev => {
   const m = ev.data; if (!m) return;
   if (m.t === 'state') {
     stEl.textContent = '本体に接続中'; stEl.classList.add('live');
-    cols = m.cols || 5; pads = m.pads || [];
+    cols = m.cols || 5; rows = m.rows || 4; pads = m.pads || [];
     document.documentElement.dataset.theme = m.theme || 'light';
     render();
   } else if (m.t === 'close') {
     stEl.textContent = '本体が閉じられました'; stEl.classList.remove('live');
   }
 };
+$('#prev').onclick = () => { page--; render(); };
+$('#next').onclick = () => { page++; render(); };
 $('#panic').onclick = () => CH.postMessage({ t:'panic' });
 $('#stopSfx').onclick = () => CH.postMessage({ t:'stopSfx' });
 $('#theme').onclick = () => {

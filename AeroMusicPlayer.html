@@ -340,6 +340,10 @@ footer b{color:var(--fg)}
 .plsearch{width:130px;min-width:90px;background:var(--surface);border:1px solid var(--line2);
   border-radius:var(--r);padding:4px 8px;color:var(--fg);outline:none}
 .plsearch:focus{border-color:var(--line)}
+.numin{width:52px;text-align:center;background:var(--surface);border:1px solid var(--line2);
+  border-radius:var(--r);padding:3px 4px;color:var(--fg);outline:none}
+.numin:focus{border-color:var(--line)}
+html[data-ui="touch"] .numin{width:66px;padding:9px 6px;font-size:14px;min-height:44px}
 .pl-mark{font-size:11px;color:var(--c-bgm);flex-shrink:0;letter-spacing:1px}
 .pl-item.missing .pl-name{color:var(--hot);text-decoration:line-through}
 .pl-item.missing::after{content:"見つかりません";font-size:10px;color:var(--hot);flex-shrink:0}
@@ -560,7 +564,7 @@ html[data-ui="touch"] header .spacer,html[data-ui="touch"] .bar .spacer{flex-shr
       <span class="tag" id="bgmDev">出力: 既定</span>
       <div class="spacer"></div>
       <button class="btn sm q" id="deckMinus" title="デッキを減らす">−</button>
-      <span class="tag" id="deckNum">2</span>
+      <input class="numin" id="deckNum" type="number" min="1" max="24" step="1" value="2" title="デッキの数（1〜24）">
       <button class="btn sm q" id="deckPlus" title="デッキを増やす">＋</button>
       <button class="btn sm q" id="btnAutoMix" title="曲が終わる前に自動で次へつなぐ">AUTO MIX</button>
     </div>

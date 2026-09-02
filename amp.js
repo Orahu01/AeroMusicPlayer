@@ -11,8 +11,9 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const AUDIO_EXT = /\.(mp3|wav|ogg|oga|m4a|mp4|aac|flac|opus|webm|aif|aiff)$/i;
 
-const DECK_IDS = ['A', 'B', 'C', 'D', 'E', 'F'];
-const MAX_DECKS = 6, MAX_PADS = 63, MAX_VOICES = 64;
+const MAX_DECKS = 24, MAX_PADS = 63, MAX_VOICES = 64;
+/* A〜X の 24 個。デッキ名として1文字で収まる範囲 */
+const DECK_IDS = Array.from({ length: MAX_DECKS }, (_, i) => String.fromCharCode(65 + i));
 const WAVE_MAX_BYTES = 80 << 20;
 
 const PAD_COLORS = ['#c8c6c2','#d14b3f','#d98324','#c9a227','#4f8a4a','#3a72a8','#6d5aa8','#a8497e','#5a5a58','#141414'];
@@ -542,7 +543,7 @@ function buildDecks(n) {
   while (DECKS.length < n) { const d = new Deck(DECK_IDS[DECKS.length]); DECKS.push(d); box.appendChild(d.el); d.sync(); }
   while (DECKS.length > n) { const d = DECKS.pop(); d.stop(); if (d.url) URL.revokeObjectURL(d.url); d.el.remove(); }
   S.deckCount = DECKS.length;
-  $('#deckNum').textContent = DECKS.length;
+  $('#deckNum').value = DECKS.length;
   $('#deckMinus').disabled = DECKS.length <= 1;
   $('#deckPlus').disabled = DECKS.length >= MAX_DECKS;
   selectDeck(DECK_IDS[clamp(selDeck, 0, DECKS.length - 1)]);
@@ -914,7 +915,11 @@ function renderPlaylist() {
       '<span class="pl-mark">' + marks + '</span>' +
       '<span class="pl-acts">' +
       (canDrag || q ? '' : '<button class="btn sm q" data-a="up" title="上へ">▲</button><button class="btn sm q" data-a="dn" title="下へ">▼</button>') +
-      DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('') +
+      // デッキが多いときは1つずつ並べるとボタンだらけになるので、
+      // 「空いているデッキへ読み込む」1つにまとめる（特定のデッキへはドラッグで置ける）
+      (DECKS.length <= 4
+        ? DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('')
+        : '<button class="btn sm q" data-a="load" title="空いているデッキに読み込む">読込</button>') +
       '<button class="btn sm q" data-a="cue" title="ヘッドホンで試聴">試聴</button>' +
       '<button class="btn sm q" data-a="trk" title="イン点・アウト点・音量の自動変化">調整</button>' +
       '<button class="btn sm q" data-a="del">✕</button></span>' +
@@ -934,8 +939,8 @@ function renderPlaylist() {
         [PL[i], PL[to]] = [PL[to], PL[i]];
         plCursor = -1; renderPlaylist(); saveState(); return;
       }
-      const dk = deckOf(a);
-      if (dk && await dk.load(it)) { plCursor = i; selectDeck(a); }
+      const dk = a === 'load' ? idleDeck() : deckOf(a);
+      if (dk && await dk.load(it)) { plCursor = i; selectDeck(dk.id); }
     };
     // ドラッグで並べ替え
     d.ondragstart = e => { e.dataTransfer.setData('amp/pl', String(i)); e.dataTransfer.effectAllowed = 'move'; d.classList.add('dragging'); };
@@ -1620,6 +1625,7 @@ function loop() {
   meter('#mtCue', null, BUS.cue);
 
   for (const d of DECKS) {
+    if (!d.audio.src) continue;          // 空のデッキは触らない（24枚あっても軽い）
     d.tickAuto();
     const a = d.audio, dur = a.duration || 0, cur = a.currentTime || 0;
     const p = dur ? cur / dur : 0;
@@ -2139,6 +2145,15 @@ function bindUI() {
 
   $('#deckPlus').onclick  = () => { buildDecks(DECKS.length + 1); renderPlaylist(); saveState(); };
   $('#deckMinus').onclick = () => { buildDecks(DECKS.length - 1); renderPlaylist(); saveState(); };
+  $('#deckNum').onchange = e => {
+    const n = clamp(parseInt(e.target.value, 10) || DECKS.length, 1, MAX_DECKS);
+    // 減らすときに再生中のデッキを黙って消さない
+    const busy = DECKS.slice(n).filter(d => d.playing).length;
+    if (busy && !confirm('再生中のデッキが ' + busy + ' 個あります。停止して減らしますか？')) {
+      e.target.value = DECKS.length; return;
+    }
+    buildDecks(n); renderPlaylist(); saveState();
+  };
   $('#btnAutoMix').onclick = e => { S.autoMix = !S.autoMix; e.target.classList.toggle('on', S.autoMix); saveState(); };
 
   /* タブ（プレイリスト / 進行表） */

@@ -153,6 +153,20 @@ main{display:flex;flex:1;min-height:0;overflow:hidden}
 }
 .deck,.pl-item,.cue-item{touch-action:pan-y}
 #decks{overflow-y:auto;flex-shrink:0;max-height:56%;background:var(--c-bgm-wash)}
+/* 高さ・幅を自分で決めたときは、既定の割合の制限を外す */
+#decks.sized{max-height:none}
+
+/* ---------- 仕切り（ドラッグで大きさを変える） ---------- */
+.vsplit,.hsplit{flex-shrink:0;display:grid;place-items:center;background:var(--surface3);
+  border-bottom:1px solid var(--line2);touch-action:none}
+.vsplit{height:9px;cursor:row-resize}
+.hsplit{width:9px;cursor:col-resize;border-bottom:none;border-left:1px solid var(--line);border-right:1px solid var(--line)}
+.vsplit span{width:34px;height:2px;background:var(--fg3);border-radius:1px}
+.hsplit span{width:2px;height:34px;background:var(--fg3);border-radius:1px}
+.vsplit:hover,.hsplit:hover,.vsplit.act,.hsplit.act{background:var(--c-bgm)}
+.vsplit:hover span,.hsplit:hover span,.vsplit.act span,.hsplit.act span{background:#fff}
+html[data-ui="touch"] .vsplit{height:16px}
+html[data-ui="touch"] .hsplit{width:16px}
 .deck{padding:7px 10px;border-bottom:1px solid var(--line2);background:var(--surface);box-shadow:var(--sh-1)}
 .deck.sel{background:var(--surface2);box-shadow:inset 3px 0 0 var(--c-bgm)}
 .deck.live{background:var(--inv-bg);color:var(--inv-fg)}
@@ -333,6 +347,22 @@ footer b{color:var(--fg)}
   background:var(--surface);border:2px dashed var(--line);font-size:17px;font-weight:700;pointer-events:none}
 #drop.show{display:grid}
 
+/* デッキ選択のポップアップ */
+#deckPick{position:fixed;z-index:70;display:none;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh-3);
+  max-height:60vh;overflow-y:auto;min-width:190px;padding:4px;
+  touch-action:pan-y;overscroll-behavior:contain}
+#deckPick.show{display:block}
+.dp-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--r);
+  cursor:pointer;font-size:12.5px;white-space:nowrap}
+.dp-item:hover{background:var(--surface3)}
+.dp-item .id{font-weight:700;min-width:18px;text-align:center;color:var(--c-bgm)}
+.dp-item .now{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--fg3);font-size:11px}
+.dp-item.busy .now{color:var(--hot)}
+.dp-sep{height:1px;background:var(--line2);margin:4px 2px}
+html[data-ui="touch"] .dp-item{padding:12px 12px;font-size:15px;min-height:48px}
+html[data-ui="touch"] #deckPick{min-width:240px}
+
 /* ---------- タブ / 検索 ---------- */
 .tab{font-size:11px;font-weight:700;letter-spacing:1.2px;padding:5px 11px;border:1px solid var(--line2);
   border-radius:var(--r);background:transparent;color:var(--fg2)}
@@ -496,17 +526,19 @@ html[data-ui="touch"] #checkBar{padding:11px 12px;font-size:13.5px}
 /* ---------- 画面が狭いとき（タブレット等） ---------- */
 @media (max-width:1000px){
   main{flex-direction:column}
-  .col-bgm{width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--line);max-height:46%}
+  .col-bgm{width:100%!important;min-width:0;border-right:none;border-bottom:1px solid var(--line);max-height:46%}
   #decks{max-height:none}
   header{height:auto;flex-wrap:wrap;padding:6px 10px;gap:7px}
+  .hsplit{display:none}          /* 上下に並ぶので左右の仕切りは使わない */
 }
 /* タッチUIは要素が大きい分、横に並べると片方が窮屈になる。
    早めに上下2段へ切り替えて、それぞれに十分な幅を与える。 */
 @media (max-width:1400px){
   html[data-ui="touch"] main{flex-direction:column}
-  html[data-ui="touch"] .col-bgm{width:100%;min-width:0;border-right:none;
+  html[data-ui="touch"] .col-bgm{width:100%!important;min-width:0;border-right:none;
     border-bottom:1px solid var(--line);max-height:44%}
   html[data-ui="touch"] #decks{max-height:none}
+  html[data-ui="touch"] .hsplit{display:none}
 }
 /* ヘッダーとバーは折り返して縦に伸びるより、横スクロールさせた方が
    本体の表示領域を食わない */
@@ -570,6 +602,7 @@ html[data-ui="touch"] header .spacer,html[data-ui="touch"] .bar .spacer{flex-shr
     </div>
 
     <div id="decks"></div>
+    <div class="vsplit" id="splitDecks" title="ドラッグで BGM 欄の高さを変える（ダブルクリックで元に戻す）"><span></span></div>
 
     <div class="bar c-web">
       <h3>WEB</h3>
@@ -641,6 +674,8 @@ html[data-ui="touch"] header .spacer,html[data-ui="touch"] .bar .spacer{flex-shr
     </div>
   </section>
 
+  <div class="hsplit" id="splitCols" title="ドラッグで左右の幅を変える（ダブルクリックで元に戻す）"><span></span></div>
+
   <!-- ================= SE ================= -->
   <section class="col-sfx">
     <div class="bar c-sfx">
@@ -680,6 +715,7 @@ html[data-ui="touch"] header .spacer,html[data-ui="touch"] .bar .spacer{flex-shr
 </div>
 
 <div id="drop">ドロップして読み込み</div>
+<div id="deckPick"></div>
 <div id="toast"></div>
 
 <!-- ================= 設定 ================= -->

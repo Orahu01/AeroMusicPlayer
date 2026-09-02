@@ -1,6 +1,6 @@
 {
   "name": "aeromusic-player",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "文化祭などでBGMと効果音を同時に多重再生するための音声プレイヤー",
   "private": true,
   "license": "MIT",

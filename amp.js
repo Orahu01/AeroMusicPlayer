@@ -51,6 +51,7 @@ const S = {
   eq:{ bgm:EQ_DEFAULT(), sfx:EQ_DEFAULT() },
   limiter:true, wake:true, confirmExit:true, autoAdv:true, autoMix:false,
   cols:5, padRows:4, padRowsAuto:true, padPage:0, padCount:20, deckCount:2,
+  decksH:0, colPct:0,          // 0 = 既定の割合のまま（仕切りをドラッグすると px / % が入る）
   webVol:1, webOpen:false, webHistory:[],
   normalize:true,        // 曲ごとの音量を自動でそろえる
   normTarget:-16,        // そろえる目標ラウドネス(dBFS RMS)
@@ -655,11 +656,19 @@ class Pad {
     this.render(); updateMem();
     return !!this.buffer;
   }
+  /* パッドを空に戻す。
+     音源の実体（.exe 版はファイル、Web版は IndexedDB）を確実に消し、
+     設定も既定へ戻す。片方だけ消すと、次回起動時に音だけ復活したり
+     前の設定が残ったままになる。 */
   clear() {
     this.stopAll(0);
-    this.buffer = null; this.src = null; this.name = '';
-    DB.del(padBlobKey(this.i)).catch(() => {});
-    this.render(); updateMem();
+    this.buffer = null; this.src = null; this.name = ''; this.loading = false;
+    this.mode = 'poly'; this.vol = 1; this.fade = 80; this.rate = 1; this.loop = false;
+    this.color = PAD_COLORS[this.i % PAD_COLORS.length];
+    this.key = KEY_LAYOUT[this.i] ? KEY_LAYOUT[this.i][0] : null;
+    STORE.delPad(this.i);
+    this.el.classList.remove('loading');
+    this.render(); rebuildKeyMap(); updateMem(); saveState();
   }
 
   trigger(vel = 1) {
@@ -886,6 +895,40 @@ function pumpDuration() {
     })();
   }
 }
+/* どのデッキに入れるかを選ぶポップアップ。
+   デッキが増えても「行にボタンを並べる」方式に戻さずに選択できるようにするため。 */
+function closeDeckPick() { $('#deckPick').classList.remove('show'); }
+function openDeckPick(anchor, item, plIndex) {
+  const box = $('#deckPick');
+  box.replaceChildren();
+  const add = (id, label, now, busy, fn) => {
+    const d = document.createElement('div');
+    d.className = 'dp-item' + (busy ? ' busy' : '');
+    d.innerHTML = '<span class="id"></span><span>' + label + '</span><span class="now"></span>';
+    $('.id', d).textContent = id;
+    $('.now', d).textContent = now;
+    d.onclick = async e => { e.stopPropagation(); closeDeckPick(); await fn(); };
+    box.appendChild(d);
+  };
+  add('▸', '空いているデッキに入れる', '', false, async () => {
+    const dk = idleDeck();
+    if (await dk.load(item)) { plCursor = plIndex; selectDeck(dk.id); toast('デッキ ' + dk.id + ' に読み込みました'); }
+  });
+  const sep = document.createElement('div'); sep.className = 'dp-sep'; box.appendChild(sep);
+  for (const dk of DECKS) {
+    add(dk.id, dk.meta ? dk.meta.name : '（空）', dk.playing ? '再生中' : '', dk.playing, async () => {
+      if (dk.playing && !confirm('デッキ ' + dk.id + ' は再生中です。差し替えますか？')) return;
+      if (await dk.load(item)) { plCursor = plIndex; selectDeck(dk.id); }
+    });
+  }
+  box.classList.add('show');
+  const r = anchor.getBoundingClientRect(), b = box.getBoundingClientRect();
+  box.style.left = Math.max(6, Math.min(r.left, innerWidth - b.width - 6)) + 'px';
+  box.style.top = (r.bottom + b.height + 6 > innerHeight ? Math.max(6, r.top - b.height - 4) : r.bottom + 4) + 'px';
+}
+addEventListener('pointerdown', e => { if (!e.target.closest('#deckPick')) closeDeckPick(); }, true);
+addEventListener('keydown', e => { if (e.code === 'Escape') closeDeckPick(); }, true);
+
 let plFilter = '';
 function renderPlaylist() {
   const box = $('#playlist');
@@ -917,9 +960,11 @@ function renderPlaylist() {
       (canDrag || q ? '' : '<button class="btn sm q" data-a="up" title="上へ">▲</button><button class="btn sm q" data-a="dn" title="下へ">▼</button>') +
       // デッキが多いときは1つずつ並べるとボタンだらけになるので、
       // 「空いているデッキへ読み込む」1つにまとめる（特定のデッキへはドラッグで置ける）
+      // デッキが少ないうちは直接ボタン、多いときは選択メニュー。
+      // どちらの場合も「どのデッキに入れるか」は必ず選べるようにする。
       (DECKS.length <= 4
         ? DECKS.map(dk => '<button class="btn sm q" data-a="' + dk.id + '">' + dk.id + '</button>').join('')
-        : '<button class="btn sm q" data-a="load" title="空いているデッキに読み込む">読込</button>') +
+        : '<button class="btn sm q" data-a="pick" title="入れるデッキを選ぶ">読込 ▾</button>') +
       '<button class="btn sm q" data-a="cue" title="ヘッドホンで試聴">試聴</button>' +
       '<button class="btn sm q" data-a="trk" title="イン点・アウト点・音量の自動変化">調整</button>' +
       '<button class="btn sm q" data-a="del">✕</button></span>' +
@@ -933,6 +978,7 @@ function renderPlaylist() {
       if (a === 'del') { PL.splice(i, 1); renderPlaylist(); saveState(); return; }
       if (a === 'cue') { playCue(it, i); return; }
       if (a === 'trk') { openTrackDlg(it); return; }
+      if (a === 'pick') { openDeckPick(b, it, i); return; }
       if (a === 'up' || a === 'dn') {
         const to = i + (a === 'up' ? -1 : 1);
         if (to < 0 || to >= PL.length) return;
@@ -1575,6 +1621,59 @@ function applyTheme() {
   requestAnimationFrame(() => DECKS.forEach(d => d.drawWave()));
   pushPadState();
 }
+/* ---------------------------------------------------------
+   仕切りのドラッグ（BGM 欄の高さ / 左右の幅）
+   デッキを増やすと既定の割合では窮屈になるため、手で広げられるようにする。
+   --------------------------------------------------------- */
+function applySizes() {
+  const decks = $('#decks'), col = $('.col-bgm');
+  if (S.decksH > 0) { decks.style.height = S.decksH + 'px'; decks.classList.add('sized'); }
+  else { decks.style.height = ''; decks.classList.remove('sized'); }
+  col.style.width = S.colPct > 0 ? S.colPct + '%' : '';
+  requestAnimationFrame(() => { layoutPads(); DECKS.forEach(d => d.drawWave()); });
+}
+function bindSplitters() {
+  const decks = $('#decks'), col = $('.col-bgm'), main = $('main');
+
+  const drag = (el, onMove, onReset) => {
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch {}   // 捕捉できなくてもドラッグは続行する
+      el.classList.add('act');
+      const move = ev => onMove(ev);
+      const up = () => {
+        el.classList.remove('act');
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+        saveState();
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
+    el.addEventListener('dblclick', () => { onReset(); applySizes(); saveState(); });
+  };
+
+  drag($('#splitDecks'),
+    ev => {
+      const top = decks.getBoundingClientRect().top;
+      // 下のプレイリスト側にも最低限の高さを残す
+      const maxH = col.getBoundingClientRect().bottom - top - 150;
+      S.decksH = Math.round(clamp(ev.clientY - top, 90, Math.max(120, maxH)));
+      applySizes();
+    },
+    () => { S.decksH = 0; });
+
+  drag($('#splitCols'),
+    ev => {
+      const r = main.getBoundingClientRect();
+      S.colPct = +clamp(((ev.clientX - r.left) / r.width) * 100, 22, 78).toFixed(1);
+      applySizes();
+    },
+    () => { S.colPct = 0; });
+}
+
 /* 誤操作ロック。本番中の誤クリックで BGM が止まる事故を防ぐ。
    効果音のパッドと全停止だけは、ロック中でも使えるようにしておく。 */
 function applyLock() {
@@ -1778,7 +1877,7 @@ function stateSnapshot() {
     theme:S.theme, ui:S.ui, sinks:S.sinks, duck:S.duck, fade:S.fade, vol:S.vol, mute:S.mute, eq:S.eq,
     limiter:S.limiter, wake:S.wake, confirmExit:S.confirmExit, autoAdv:S.autoAdv, autoMix:S.autoMix,
     cols:S.cols, padRows:S.padRows, padRowsAuto:S.padRowsAuto, padPage:S.padPage,
-    padCount:PADS.length, deckCount:DECKS.length,
+    padCount:PADS.length, deckCount:DECKS.length, decksH:S.decksH, colPct:S.colPct,
     webVol:S.webVol, webOpen:S.webOpen, webHistory:S.webHistory,
     normalize:S.normalize, normTarget:S.normTarget, locked:S.locked,
     ghk:S.ghk, ghkMod:S.ghkMod, tracks:S.tracks,
@@ -1827,6 +1926,8 @@ async function restoreState() {
   S.padRowsAuto = d.padRowsAuto !== false;
   S.padPage = Math.max(0, d.padPage | 0);
   S.deckCount = clamp(d.deckCount || 2, 1, MAX_DECKS);
+  S.decksH = Math.max(0, d.decksH | 0);
+  S.colPct = d.colPct > 0 ? clamp(+d.colPct, 22, 78) : 0;
   S.padCount = clamp(d.padCount || 20, 1, MAX_PADS);
   S.webVol = clamp(d.webVol != null ? +d.webVol : 1, 0, 1);
   S.webOpen = !!d.webOpen;
@@ -2277,12 +2378,28 @@ function bindUI() {
     addEventListener('keydown', h, true);
   };
 
-  let dragN = 0;
-  addEventListener('dragenter', e => { e.preventDefault(); if (++dragN === 1) $('#drop').classList.add('show'); });
-  addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('#drop').classList.remove('show'); } });
-  addEventListener('dragover', e => e.preventDefault());
+  /* ドロップ案内の出し方。
+     dragenter / dragleave の数を数える方式は、子要素をまたぐたびに数が狂ううえ、
+     パッドやデッキが drop を止めると解除処理まで届かず出っぱなしになる。
+     「ファイルをドラッグ中だけ出し、dragover が途切れたら消す」方式にする。 */
+  let dropT = 0;
+  const showDrop = on => $('#drop').classList.toggle('show', on);
+  const isFileDrag = e => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  addEventListener('dragover', e => {
+    e.preventDefault();
+    if (!isFileDrag(e)) return;                 // 行の並べ替えなど、内部のドラッグでは出さない
+    showDrop(true);
+    clearTimeout(dropT);
+    dropT = setTimeout(() => showDrop(false), 150);
+  });
+  // capture 段階なので、パッド側が stopPropagation してもここは必ず通る
+  const clearDrop = () => { clearTimeout(dropT); showDrop(false); };
+  addEventListener('drop', clearDrop, true);
+  addEventListener('dragend', clearDrop, true);
+  addEventListener('dragleave', e => { if (!e.relatedTarget) clearDrop(); }, true);
+
   addEventListener('drop', async e => {
-    e.preventDefault(); dragN = 0; $('#drop').classList.remove('show');
+    e.preventDefault(); clearDrop();
     if (e.target.closest('.pad') || e.target.closest('.deck')) return;
     const files = await filesFromDataTransfer(e.dataTransfer);
     if (!files.length) { toast('対応する音声ファイルがありません', true); return; }
@@ -2381,6 +2498,8 @@ function bindUpdater() {
   buildMixer();
   bindUpdater();
   bindWebUI();
+  bindSplitters();
+  applySizes();
 
   $('#volBgm').value = S.vol.bgm; $('#volSfx').value = S.vol.sfx; $('#volCue').value = S.vol.cue;
   $('#muteBgm').classList.toggle('muted', S.mute.bgm);

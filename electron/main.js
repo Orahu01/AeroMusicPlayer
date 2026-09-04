@@ -99,9 +99,15 @@ function wireStore() {
   });
   ipcMain.handle('store-set-pad', (_e, i, bytes, name) => {
     try {
-      const old = padPath(i); if (old) fs.unlinkSync(old);
+      // 新しい音源を書き切ってから古いファイルを消す。
+      // 先に消してしまうと、書き込みが失敗（ディスク容量不足・権限・
+      // ウイルス対策ソフトによる一時ロック等）したときにパッドの音が
+      // 何も残らなくなる。
       const ext = (path.extname(name || '') || '.bin').toLowerCase();
-      writeAtomic(path.join(PADS_DIR, 'pad-' + i + ext), Buffer.from(bytes));
+      const target = path.join(PADS_DIR, 'pad-' + i + ext);
+      writeAtomic(target, Buffer.from(bytes));
+      const old = padPath(i);
+      if (old && old !== target) fs.unlinkSync(old);   // 拡張子が変わった場合の残骸だけ後始末
       return true;
     } catch { return false; }
   });

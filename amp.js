@@ -237,7 +237,14 @@ class Bus {
   setVolume(v) { this.master.gain.setTargetAtTime(v, this.ctx.currentTime, .015); }
   async setSink(id) {
     if (typeof this.ctx.setSinkId !== 'function') throw new Error('この環境では出力先を指定できません');
-    await this.ctx.setSinkId(!id || id === 'default' ? '' : id);
+    const want = !id || id === 'default' ? '' : id;
+    // 既に同じ出力先ならやり直さない。setSinkId は端末のストリームを
+    // 作り直すため、変わっていないのに呼ぶと再生中のバスでプツッと鳴る
+    // （他のバスの出力先を変えた時や devicechange イベントで毎回全バスに
+    // 再適用しているため、素通しにしておかないと無関係な音まで揺れる）
+    if (this._sinkId === want) return;
+    await this.ctx.setSinkId(want);
+    this._sinkId = want;
   }
   resume() { if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {}); }
   level() {
@@ -303,7 +310,7 @@ class Deck {
              .connect(this.fadeG).connect(this.volG).connect(this.bus.input);
 
     this.meta = null; this.url = null; this.peaks = null;
-    this.vol = 1; this.loop = false; this.fadeTok = 0; this.waveTok = 0;
+    this.vol = 1; this.loop = false; this.fadeTok = 0; this.waveTok = 0; this.loadTok = 0;
 
     const el = this.el = document.createElement('div');
     el.className = 'deck'; el.dataset.deck = id; el.innerHTML = DECK_HTML;
@@ -374,13 +381,15 @@ class Deck {
     const c = this.conf;
     if (!c || !c.auto || !c.auto.length) return 1;
     const pts = [...c.auto].sort((a, b) => a.at - b.at);
-    let prev = 1;
-    for (const p of pts) {
-      if (t < p.at) return prev;
-      if (p.over > 0 && t < p.at + p.over) return prev + (p.to - prev) * ((t - p.at) / p.over);
-      prev = p.to;
-    }
-    return prev;
+    // 「t 以下で一番新しい点」を探す。2点の時間が近くて片方のランプ区間が
+    // もう片方の開始時刻を跨いでいても、後の点の at を過ぎたら必ずそちらを
+    // 優先する（先勝ちだと後の点が永遠に評価されず、区間が切れた瞬間に
+    // 音量が飛ぶ）。
+    let idx = -1;
+    for (let i = 0; i < pts.length; i++) { if (pts[i].at > t) break; idx = i; }
+    if (idx < 0) return 1;
+    const cur = pts[idx], base = idx > 0 ? pts[idx - 1].to : 1;
+    return (cur.over > 0 && t < cur.at + cur.over) ? base + (cur.to - base) * ((t - cur.at) / cur.over) : cur.to;
   }
   /* 毎フレーム呼ばれ、オートメーションの反映とアウト点の監視を行う */
   tickAuto() {
@@ -391,7 +400,9 @@ class Deck {
     if (Math.abs(g.value - target) > 0.002) g.setTargetAtTime(target, ct, 0.03);
     if (this.playing) {
       const out = this.outAt;
-      if (out > 0 && t >= out - 0.02) {
+      // out が in 以下（誤操作で入れ違えた等）だと毎ティック同じ場所へ戻り続けて
+      // 進めなくなるので、out が in より明確に後ろにある時だけアウト点を有効にする
+      if (out > 0 && out > this.inAt + 0.05 && t >= out - 0.02) {
         if (this.loop) { this.audio.currentTime = this.inAt; }
         else { this.audio.pause(); this.audio.currentTime = this.inAt; this.sync(); onDeckEnded(this); }
       }
@@ -410,8 +421,23 @@ class Deck {
   }
 
   async load(src) {
+    // 同じデッキに対する load() が重なったとき、後から始まった呼び出しが
+    // 先に終わって別の呼び出しに上書きされないよう、常に「一番最後に
+    // 呼ばれた load()」だけが実際に反映されるようにする。
+    const tok = ++this.loadTok;
     const file = await ensureFile(src);
+    if (tok !== this.loadTok) return false;
     if (!file) { toast('ファイルが見つかりません: ' + src.name, true); renderPlaylist(); return false; }
+    if (this.playing) {
+      // 再生中のデッキへ読み込みをかけると波形の途中でいきなり止まって
+      // 「プツッ」という音が出るので、ごく短いフェードを挟んでから切り替える
+      const g = this.fadeG.gain, t0 = this.bus.ctx.currentTime;
+      g.cancelScheduledValues(t0);
+      g.setValueAtTime(Math.max(g.value, 1e-4), t0);
+      g.exponentialRampToValueAtTime(1e-4, t0 + 0.02);
+      await new Promise(r => setTimeout(r, 25));
+      if (tok !== this.loadTok) return false;
+    }
     this.audio.pause();
     if (this.url) URL.revokeObjectURL(this.url);
     this.url = URL.createObjectURL(file);
@@ -444,7 +470,7 @@ class Deck {
     else g.setValueAtTime(1, t);
     this.audio.play().catch(e => toast('再生失敗: ' + e.message, true));
   }
-  pause() { this.audio.pause(); }
+  pause() { this.fadeTok++; this.audio.pause(); }   // 進行中の fadeStop() の遅延 stop() を無効化する
   toggle() { this.playing ? this.pause() : this.play(); }
   stop() {
     this.fadeTok++;
@@ -461,12 +487,23 @@ class Deck {
     g.exponentialRampToValueAtTime(1e-4, t + Math.max(sec, .02));
     setTimeout(() => { if (tok === this.fadeTok) this.stop(); }, sec * 1000 + 60);
   }
-  /* クロスフェードの片側 */
-  rampCurve(curve, sec, thenStop) {
+  /* クロスフェードの片側。
+     setValueCurveAtTime はカーブの先頭値(curve[0])を「その時刻の値」として
+     問答無用で採用するため、直前の setValueAtTime(g.value, t) は同じ時刻では
+     効かず、クロスフェードの途中で掛け直すと今の音量から curve[0] へ一瞬で
+     飛んでプツッと鳴る。カーブの形（イーズ）はそのまま保ちつつ、開始点だけ
+     「今の実際の音量」・終着点は「元のカーブの終点」に合わせて引き伸ばし
+     直すことで、どの音量から再スタートしても飛ばずに繋がる。 */
+  rampCurve(curve, sec, thenStop, fromOverride) {
     const g = this.fadeG.gain, t = this.bus.ctx.currentTime, tok = ++this.fadeTok;
     g.cancelScheduledValues(t);
-    g.setValueAtTime(g.value, t);
-    g.setValueCurveAtTime(curve, t, Math.max(sec, .05));
+    // fromOverride は「無音から新規にフェードインする」時専用。cancelScheduledValues
+    // は同時刻に仕込んだ値も一緒に消してしまうので、呼び出し側で先に g.value を
+    // 書き換えておく方式は効かない。数値として渡してもらう。
+    const from = Math.max(fromOverride != null ? fromOverride : g.value, 1e-4), c0 = curve[0], cN = curve[curve.length - 1], span = cN - c0;
+    const scaled = span === 0 ? curve : Float32Array.from(curve, v => from + (v - c0) * (cN - from) / span);
+    g.setValueAtTime(from, t);
+    g.setValueCurveAtTime(scaled, t, Math.max(sec, .05));
     if (thenStop) setTimeout(() => { if (tok === this.fadeTok) this.stop(); }, sec * 1000 + 80);
   }
 
@@ -564,17 +601,33 @@ function idleDeck() { return DECKS.find(d => !d.playing) || curDeck(); }
 function crossfadeTo(deck, sec) {
   if (!deck.audio.src) { toast('デッキ ' + deck.id + ' は空です'); return; }
   const others = DECKS.filter(d => d !== deck && d.playing);
-  if (!deck.playing) { deck.play(0); }
-  deck.rampCurve(XF_UP, sec, false);
+  const fresh = !deck.playing;
+  if (fresh) deck.play(0);
+  // 新規にフェードインするデッキ（さっきまで鳴っていなかった）は無音から
+  // 始める。play(0) は音量を 1 にするが、それは rampCurve() 側で無視して
+  // よい旨を明示する（既に鳴っていたデッキを繋ぎ直す場合は、今の実際の
+  // 音量から滑らかに続ける＝fromOverride なし）。
+  deck.rampCurve(XF_UP, sec, false, fresh ? 1e-4 : undefined);
   others.forEach(d => d.rampCurve(XF_DN, sec, true));
   selectDeck(deck.id);
 }
 
+/* プレイリスト上で「今の次」の曲。plCursor を進めるのはここでは行わず、
+   実際に読み込めた時点（呼び出し側）で確定させる。 */
+function nextTrack() {
+  if (!PL.length) return null;
+  const i = (plCursor + 1) % PL.length;
+  return { i, item: PL[i] };
+}
 function onDeckEnded(d) {
   d.sync();
   if (S.autoMix || !S.autoAdv) return;
   const nx = nextTrack();
-  if (nx) d.load(nx.item).then(ok => { if (ok) { plCursor = nx.i; d.play(); } });
+  // load() 待ちの間に panic() 等でこのデッキが止められていたら、
+  // 待っていた曲を今さら鳴らさない（fadeTok は stop/play/fadeStop の
+  // たびに進むので「その間に何か起きたか」の目印として使える）
+  const tok = d.fadeTok;
+  if (nx) d.load(nx.item).then(ok => { if (ok && tok === d.fadeTok) { plCursor = nx.i; d.play(); } });
 }
 /* AUTO MIX: 残りがクロスフェード秒数を切ったら空きデッキで次曲を用意して繋ぐ */
 async function checkAutoMix() {
@@ -587,7 +640,8 @@ async function checkAutoMix() {
     if (!other) continue;
     const nx = nextTrack(); if (!nx) continue;
     mixArmed = true;
-    if (await other.load(nx.item)) { plCursor = nx.i; crossfadeTo(other, Math.min(S.fade.xf, rem)); }
+    const tok = other.fadeTok;    // panic 等でこのデッキの状態が変わっていたら繋がない
+    if (await other.load(nx.item) && tok === other.fadeTok) { plCursor = nx.i; crossfadeTo(other, Math.min(S.fade.xf, rem)); }
     setTimeout(() => { mixArmed = false; }, (S.fade.xf + 1) * 1000);
     break;
   }
@@ -602,7 +656,7 @@ const PAD_HTML = `<div class="p-key"></div><div class="p-name"></div>
 class Pad {
   constructor(i) {
     this.i = i;
-    this.src = null; this.buffer = null; this.name = ''; this.loading = false;
+    this.src = null; this.buffer = null; this.name = ''; this.loading = false; this.loadTok = 0;
     this.key = KEY_LAYOUT[i] ? KEY_LAYOUT[i][0] : null;
     this.mode = 'poly'; this.vol = 1; this.fade = 80; this.rate = 1; this.loop = false;
     this.color = PAD_COLORS[i % PAD_COLORS.length];
@@ -616,7 +670,13 @@ class Pad {
     el.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault();
-      if (!this.buffer && !this.loading) { pickForPad(this.i); return; }
+      if (!this.buffer && !this.loading) {
+        // 起動直後、前回保存したパッドをまだ復元し終えていない間は
+        // 「空」に見えるだけの可能性があるので、ファイル選択を開いて
+        // 枠を奪ってしまわないようにする
+        if (padsRestoring) { toast('起動中です。少し待ってからお試しください'); return; }
+        pickForPad(this.i); return;
+      }
       this.trigger();
       if (this.mode === 'hold') {
         const id = e.pointerId;
@@ -642,13 +702,20 @@ class Pad {
   get keyLabel() { const k = KEY_LAYOUT.find(x => x[0] === this.key); return k ? k[1] : ''; }
 
   async assign(src, { persist = true } = {}) {
+    // デコード中に別の assign()/clear() がこのパッドに対して呼ばれたら、
+    // 遅れて戻ってきたこちらの結果は捨てる（さもないと、後から鳴らした音や
+    // 消したはずの音が、遅いデコードの完了と同時に勝手に上書きしてしまう）。
+    const tok = ++this.loadTok;
     this.loading = true; this.el.classList.add('loading'); this.render();
     this.src = src; this.name = src.name.replace(/\.[^.]+$/, '');
     try {
       const file = src.file || await src.handle.getFile();
-      this.buffer = await BUS.sfx.ctx.decodeAudioData(await file.arrayBuffer());
+      const buf = await BUS.sfx.ctx.decodeAudioData(await file.arrayBuffer());
+      if (tok !== this.loadTok) return false;
+      this.buffer = buf;
       if (persist) savePadBlob(this.i, file);
     } catch {
+      if (tok !== this.loadTok) return false;
       this.buffer = null; this.src = null; this.name = '';
       toast('この形式は読み込めませんでした: ' + src.name, true);
     }
@@ -661,6 +728,7 @@ class Pad {
      設定も既定へ戻す。片方だけ消すと、次回起動時に音だけ復活したり
      前の設定が残ったままになる。 */
   clear() {
+    this.loadTok++;      // 進行中の assign() のデコードが後で戻ってきても無視させる
     this.stopAll(0);
     this.buffer = null; this.src = null; this.name = ''; this.loading = false;
     this.mode = 'poly'; this.vol = 1; this.fade = 80; this.rate = 1; this.loop = false;
@@ -745,11 +813,23 @@ class Pad {
 }
 
 const PADS = [];
+// true の間は「空のパッドをクリック→ファイル選択」を止める。
+// 起動直後、restorePads() が終わるまでは既存のパッドも見た目が空と
+// 区別つかないため。restorePads() 完了時に false へ戻す。
+let padsRestoring = true;
 const voiceCount = () => PADS.reduce((n, p) => n + p.voices.size, 0);
 function stealOldestVoice() {
   let o = null;
   for (const p of PADS) for (const v of p.voices) if (!o || v.t0 < o.t0) o = v;
-  if (o) try { o.s.stop(); } catch {}
+  if (!o) return;
+  // 他の停止経路（stopAll 等）と同じく、ぶつ切りではなくごく短いフェードで止める
+  try {
+    const c = BUS.sfx.ctx, t = c.currentTime, f = .015;
+    o.g.gain.cancelScheduledValues(t);
+    o.g.gain.setValueAtTime(Math.max(o.g.gain.value, 1e-4), t);
+    o.g.gain.exponentialRampToValueAtTime(1e-4, t + f);
+    o.s.stop(t + f + .01);
+  } catch {}
 }
 /* 実際に使う段数。自動なら「押しやすい高さ」から画面に入る段数を割り出す */
 let effRows = 4;
@@ -1120,16 +1200,26 @@ function updateCueGo() {
   const k = nx && (CUE_KIND[nx.kind] || CUE_KIND.note);
   $('#cueNext').textContent = nx ? (nx.label || k.label) + (nx.track ? '： ' + nx.track : '') : '— 進行表の最後です —';
 }
+/* 前の項目が dk.load() の await 待ちの間に GO を連打されると、2つ目の
+   呼び出しがそのまま最後まで実行されてしまい、例えば直後の「フェード」
+   項目が「まだ再生していないので何もしない」に化けたりする。
+   1項目を実行し終える（catch/finally も含めて）まで次の GO を無視する。 */
+let cueBusy = false;
 async function cueGo() {
+  if (cueBusy) return;
   const c = S.cues[S.cueIdx + 1];
   if (!c) { toast('進行表の最後です'); return; }
   S.cueIdx++;
+  cueBusy = true;
   try {
     if (c.kind === 'play') {
       const dk = deckOf(c.deck) || idleDeck();
       const it = PL.find(x => trackKey(x) === c.trackKey) || PL.find(x => x.name === c.track);
       if (!it) { toast('「' + (c.track || '') + '」がプレイリストにありません', true); }
-      else if (await dk.load(it)) { plCursor = PL.indexOf(it); dk.play(c.fade || 0); selectDeck(dk.id); }
+      else {
+        const tok = dk.fadeTok;   // 待っている間に panic 等で止められていたら鳴らさない
+        if (await dk.load(it) && tok === dk.fadeTok) { plCursor = PL.indexOf(it); dk.play(c.fade || 0); selectDeck(dk.id); }
+      }
     } else if (c.kind === 'fade') {
       const dk = deckOf(c.deck); if (dk) dk.fadeStop(c.fade || S.fade.out);
     } else if (c.kind === 'stop') {
@@ -1139,6 +1229,7 @@ async function cueGo() {
       const p = PADS[c.pad]; if (p && p.buffer) p.trigger(); else toast('パッド ' + ((c.pad ?? 0) + 1) + ' は空です', true);
     }
   } catch (e) { toast('実行できませんでした: ' + e.message, true); }
+  finally { cueBusy = false; }
   renderCues(); saveState();
 }
 
@@ -1781,6 +1872,10 @@ function rebuildKeyMap() {
     if (keyMap.has(p.key)) { p.key = null; p.render(); return; }
     keyMap.set(p.key, i);
   });
+  // パッドのキー割当が変わるたびに、Electron 側のグローバルホットキー登録
+  // （キー→パッド番号）も必ず合わせておく。呼び忘れると、キー変更後も
+  // ウィンドウが非アクティブな間は古いパッド番号が鳴り続ける。
+  syncGlobalKeys();
 }
 addEventListener('keydown', e => {
   if (capturingKey) return;
@@ -1822,6 +1917,11 @@ if (NATIVE && NATIVE.onGlobalTrigger) {
   });
 }
 addEventListener('keyup', e => { const i = keyMap.get(e.code); if (i != null) PADS[i].release(); });
+/* 「押している間だけ」のパッドを押したままアプリの外へフォーカスが移る
+   （Alt-Tab、通知、別ウィンドウのダイアログ等）と、対応する pointerup/keyup が
+   このウィンドウに届かず release() が呼ばれないまま鳴りっぱなしになる。
+   ウィンドウが非アクティブになった時点で強制的に離す。 */
+addEventListener('blur', () => PADS.forEach(p => p.release()));
 
 function panic() {
   PADS.forEach(p => p.stopAll(60));
@@ -2244,16 +2344,21 @@ function bindUI() {
   chk('#optConfirmExit', () => S.confirmExit, v => S.confirmExit = v);
   chk('#optAutoAdv', () => S.autoAdv, v => S.autoAdv = v);
 
-  $('#deckPlus').onclick  = () => { buildDecks(DECKS.length + 1); renderPlaylist(); saveState(); };
-  $('#deckMinus').onclick = () => { buildDecks(DECKS.length - 1); renderPlaylist(); saveState(); };
+  // 減らすときに再生中のデッキを黙って消さない。+/-ボタンと数値入力の
+  // どちらから減らしても同じ確認を通す（buildDecks は末尾から削るので、
+  // 再生中デッキが「多い方の番号」にあると無警告で止まっていた）。
+  const requestDeckCount = n => {
+    n = clamp(n, 1, MAX_DECKS);
+    const busy = DECKS.slice(n).filter(d => d.playing).length;
+    if (busy && !confirm('再生中のデッキが ' + busy + ' 個あります。停止して減らしますか？')) return false;
+    buildDecks(n); renderPlaylist(); saveState();
+    return true;
+  };
+  $('#deckPlus').onclick  = () => requestDeckCount(DECKS.length + 1);
+  $('#deckMinus').onclick = () => requestDeckCount(DECKS.length - 1);
   $('#deckNum').onchange = e => {
     const n = clamp(parseInt(e.target.value, 10) || DECKS.length, 1, MAX_DECKS);
-    // 減らすときに再生中のデッキを黙って消さない
-    const busy = DECKS.slice(n).filter(d => d.playing).length;
-    if (busy && !confirm('再生中のデッキが ' + busy + ' 個あります。停止して減らしますか？')) {
-      e.target.value = DECKS.length; return;
-    }
-    buildDecks(n); renderPlaylist(); saveState();
+    if (!requestDeckCount(n)) e.target.value = DECKS.length;
   };
   $('#btnAutoMix').onclick = e => { S.autoMix = !S.autoMix; e.target.classList.toggle('on', S.autoMix); saveState(); };
 
@@ -2522,10 +2627,21 @@ function bindUpdater() {
   await applySinks();
   updateLatency(); updateMem(); updateWakeLock();
 
-  const r = await reconnectLibrary(false);
-  // フォルダを再接続できなくても、実ファイルパスを覚えている曲は戻せる
-  const songs = relinkPlaylist(saved);
-  const se = await restorePads(saved);
+  // 復元の途中で操作された分（音量スライダー等）が、まだ途中までしか
+  // 埋まっていない PADS/S.tracks の状態で自動保存されて上書きされないよう、
+  // 復元が終わるまで自動保存を止めておく（終わったら必ず一度書き戻す）。
+  saveSuspended = true;
+  let r, songs = 0, se = 0;
+  try {
+    r = await reconnectLibrary(false);
+    // フォルダを再接続できなくても、実ファイルパスを覚えている曲は戻せる
+    songs = relinkPlaylist(saved);
+    se = await restorePads(saved);
+  } finally {
+    saveSuspended = false;
+    padsRestoring = false;
+    await saveStateNow();
+  }
   if (se || songs) toast('前回の構成を復元しました（効果音 ' + se + '個 / 曲 ' + songs + '曲）');
 
   if (r === 'prompt') {
